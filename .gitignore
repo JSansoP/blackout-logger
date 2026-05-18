@@ -1,0 +1,18 @@
+# Database
+*.db
+*.db-wal
+*.db-shm
+
+# Configuration
+.env
+
+# Lock files
+*.lock
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+*.log
