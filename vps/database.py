@@ -25,13 +25,21 @@ CREATE TABLE IF NOT EXISTS blackouts (
     started_at TEXT NOT NULL,
     ended_at TEXT,
     duration_seconds REAL,
-    resolved BOOLEAN NOT NULL DEFAULT 0
+    resolved BOOLEAN NOT NULL DEFAULT 0,
+    blackout_type TEXT NOT NULL DEFAULT 'unknown',
+    last_known_boot_time TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_uptime_logs_timestamp ON uptime_logs(timestamp);
 CREATE INDEX IF NOT EXISTS idx_uptime_logs_reachable ON uptime_logs(was_reachable);
 CREATE INDEX IF NOT EXISTS idx_blackouts_resolved ON blackouts(resolved);
 """
+
+# Migrations for existing databases
+_MIGRATIONS = [
+    "ALTER TABLE blackouts ADD COLUMN blackout_type TEXT NOT NULL DEFAULT 'unknown'",
+    "ALTER TABLE blackouts ADD COLUMN last_known_boot_time TEXT",
+]
 
 
 def _connect():
@@ -44,11 +52,20 @@ def _connect():
 
 
 def init_db():
-    """Create tables and indexes if they don't exist."""
+    """Create tables and indexes if they don't exist. Run migrations for existing DBs."""
     conn = _connect()
     try:
         conn.executescript(_SCHEMA)
         conn.commit()
+        # Run migrations safely — each one is idempotent (ALTER TABLE is a no-op if
+        # the column already exists in SQLite, but SQLite raises OperationalError instead).
+        # We catch that error and continue.
+        for migration in _MIGRATIONS:
+            try:
+                conn.execute(migration)
+                conn.commit()
+            except Exception:
+                pass  # Column already exists
     finally:
         conn.close()
 
@@ -95,7 +112,14 @@ def get_last_successful_log():
         conn.close()
 
 
-def create_blackout(detected_at, started_at, ended_at=None, duration_seconds=None):
+def create_blackout(
+    detected_at,
+    started_at,
+    ended_at=None,
+    duration_seconds=None,
+    blackout_type="unknown",
+    last_known_boot_time=None,
+):
     """
     Insert a new blackout record.
 
@@ -104,6 +128,8 @@ def create_blackout(detected_at, started_at, ended_at=None, duration_seconds=Non
         started_at: ISO 8601 string of estimated blackout start
         ended_at: ISO 8601 string of when power returned (None if ongoing)
         duration_seconds: estimated duration in seconds (None if ongoing)
+        blackout_type: 'power', 'internet', or 'unknown'
+        last_known_boot_time: boot_time of Pi when last seen (used to determine type on recovery)
 
     Returns:
         The ID of the inserted blackout record.
@@ -112,9 +138,10 @@ def create_blackout(detected_at, started_at, ended_at=None, duration_seconds=Non
     conn = _connect()
     try:
         cursor = conn.execute(
-            """INSERT INTO blackouts (detected_at, started_at, ended_at, duration_seconds, resolved)
-               VALUES (?, ?, ?, ?, ?)""",
-            (detected_at, started_at, ended_at, duration_seconds, resolved),
+            """INSERT INTO blackouts
+               (detected_at, started_at, ended_at, duration_seconds, resolved, blackout_type, last_known_boot_time)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (detected_at, started_at, ended_at, duration_seconds, resolved, blackout_type, last_known_boot_time),
         )
         conn.commit()
         return cursor.lastrowid
@@ -141,7 +168,7 @@ def get_ongoing_blackout():
         conn.close()
 
 
-def resolve_blackout(blackout_id, ended_at, duration_seconds):
+def resolve_blackout(blackout_id, ended_at, duration_seconds, blackout_type="unknown"):
     """
     Mark a blackout as resolved.
 
@@ -149,14 +176,15 @@ def resolve_blackout(blackout_id, ended_at, duration_seconds):
         blackout_id: ID of the blackout to resolve
         ended_at: ISO 8601 string of when power returned
         duration_seconds: total duration in seconds
+        blackout_type: 'power', 'internet', or 'unknown'
     """
     conn = _connect()
     try:
         conn.execute(
             """UPDATE blackouts
-               SET ended_at = ?, duration_seconds = ?, resolved = 1
+               SET ended_at = ?, duration_seconds = ?, resolved = 1, blackout_type = ?
                WHERE id = ?""",
-            (ended_at, duration_seconds, blackout_id),
+            (ended_at, duration_seconds, blackout_type, blackout_id),
         )
         conn.commit()
     finally:

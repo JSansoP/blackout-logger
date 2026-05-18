@@ -12,6 +12,7 @@ Designed to be run as a cron job every 5 minutes:
     */5 * * * * cd /path/to/vps && python3 blackout_checker.py >> /var/log/blackout_checker.log 2>&1
 """
 
+import logging
 import os
 import sys
 import json
@@ -24,6 +25,8 @@ from datetime import datetime, timezone, timedelta
 import config
 import database
 import notifications
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -54,14 +57,14 @@ def acquire_lock():
                 old_pid = int(f.read().strip())
 
             if _is_process_alive(old_pid):
-                print(f"[INFO] Another instance is running (PID {old_pid}), exiting")
+                logger.info("Another instance is running (PID %d), exiting", old_pid)
                 return False
             else:
-                print(f"[WARN] Stale lock file found (PID {old_pid} is dead), cleaning up")
+                logger.warning("Stale lock file found (PID %d is dead), cleaning up", old_pid)
                 os.remove(lock_file)
         except (ValueError, IOError):
             # Corrupted lock file, remove it
-            print("[WARN] Corrupted lock file, cleaning up")
+            logger.warning("Corrupted lock file, cleaning up")
             os.remove(lock_file)
 
     # Write our PID
@@ -98,7 +101,7 @@ def poll_pi():
             data = json.loads(response.read().decode("utf-8"))
             return data
     except (urllib.error.URLError, urllib.error.HTTPError, OSError, json.JSONDecodeError) as e:
-        print(f"[WARN] Pi unreachable: {e}")
+        logger.warning("Pi unreachable: %s", e)
         return None
 
 
@@ -139,17 +142,28 @@ def handle_reachable(pi_data):
 
     # Log the uptime
     database.log_uptime(now, uptime_seconds, boot_time, was_reachable=True)
-    print(f"[INFO] Pi reachable — uptime: {uptime_seconds:.0f}s, boot: {boot_time}")
+    logger.info("Pi reachable — uptime: %.0fs, boot: %s", uptime_seconds, boot_time)
 
     # Check for ongoing blackout (from a previous crashed retry loop)
     ongoing = database.get_ongoing_blackout()
     if ongoing:
         duration = _seconds_between(ongoing["started_at"], boot_time)
-        database.resolve_blackout(ongoing["id"], boot_time, duration)
-        notifications.notify_blackout_resolved(
-            ongoing["started_at"], boot_time, duration
+        if duration < 0:
+            duration = 0
+
+        # Determine type: compare current boot_time with the one stored at outage start
+        blackout_type = _determine_blackout_type(
+            ongoing["last_known_boot_time"], boot_time
         )
-        print(f"[INFO] Resolved ongoing blackout #{ongoing['id']} (duration: {duration:.0f}s)")
+
+        database.resolve_blackout(ongoing["id"], boot_time, duration, blackout_type)
+        notifications.notify_blackout_resolved(
+            ongoing["started_at"], boot_time, duration, blackout_type
+        )
+        logger.info(
+            "Resolved ongoing blackout #%d (type: %s, duration: %.0fs)",
+            ongoing["id"], blackout_type, duration,
+        )
         return
 
     # Check for reboot between cron runs
@@ -157,14 +171,14 @@ def handle_reachable(pi_data):
 
     if last_log is None:
         # First run ever, nothing to compare against
-        print("[INFO] First run — no previous data to compare")
+        logger.info("First run — no previous data to compare")
         return
 
     previous_boot_time = last_log["boot_time"]
 
     if previous_boot_time is None:
         # Previous log didn't have boot_time (shouldn't happen, but be safe)
-        print("[WARN] Previous log has no boot_time, skipping comparison")
+        logger.warning("Previous log has no boot_time, skipping comparison")
         return
 
     # Compare boot times — if they differ by more than 30 seconds, a reboot happened
@@ -173,22 +187,46 @@ def handle_reachable(pi_data):
         curr_boot = _parse_iso(boot_time)
         boot_diff = abs((curr_boot - prev_boot).total_seconds())
     except (ValueError, TypeError) as e:
-        print(f"[WARN] Could not compare boot times: {e}")
+        logger.warning("Could not compare boot times: %s", e)
         return
 
     if boot_diff > 30:
-        # Reboot detected — a blackout happened between cron runs
+        # Reboot detected — a blackout happened between cron runs (always power)
         started_at = last_log["timestamp"]  # last time we saw the Pi alive
-        ended_at = boot_time  # when the Pi booted back up
+        ended_at = boot_time                 # when the Pi booted back up
         duration = _seconds_between(started_at, ended_at)
 
         # Duration could be negative if clocks are slightly off; clamp to 0
         if duration < 0:
             duration = 0
 
-        database.create_blackout(now, started_at, ended_at, duration)
+        database.create_blackout(
+            now, started_at, ended_at, duration,
+            blackout_type="power",
+            last_known_boot_time=previous_boot_time,
+        )
         notifications.notify_blackout_detected_resolved(started_at, ended_at, duration)
-        print(f"[INFO] Blackout detected between crons! ~{duration:.0f}s (boot_diff: {boot_diff:.0f}s)")
+        logger.info("Power outage detected between crons! ~%.0fs (boot_diff: %.0fs)", duration, boot_diff)
+
+
+def _determine_blackout_type(last_known_boot_time, current_boot_time):
+    """
+    Compare boot times to determine whether the outage was a power cut or internet disruption.
+
+    Returns:
+        'power'    — boot time changed, Pi rebooted (power grid outage)
+        'internet' — boot time unchanged, Pi never went down (network disruption)
+        'unknown'  — could not compare (missing data)
+    """
+    if not last_known_boot_time or not current_boot_time:
+        return "unknown"
+    try:
+        prev = _parse_iso(last_known_boot_time)
+        curr = _parse_iso(current_boot_time)
+        boot_diff = abs((curr - prev).total_seconds())
+        return "power" if boot_diff > 30 else "internet"
+    except (ValueError, TypeError):
+        return "unknown"
 
 
 def handle_unreachable():
@@ -207,19 +245,22 @@ def handle_unreachable():
     ongoing = database.get_ongoing_blackout()
     last_successful = database.get_last_successful_log()
     started_at = last_successful["timestamp"] if last_successful else now
+    last_known_boot_time = last_successful["boot_time"] if last_successful else None
 
     if ongoing is None:
         # New blackout — create record and notify
         blackout_id = database.create_blackout(
             detected_at=now,
             started_at=started_at,
+            last_known_boot_time=last_known_boot_time,
         )
         notifications.notify_blackout_in_progress(started_at)
-        print(f"[INFO] Blackout detected! Pi unreachable. Created blackout #{blackout_id}")
+        logger.info("Outage detected! Pi unreachable. Created blackout #%d", blackout_id)
     else:
         blackout_id = ongoing["id"]
         started_at = ongoing["started_at"]
-        print(f"[INFO] Continuing to monitor ongoing blackout #{blackout_id}")
+        last_known_boot_time = ongoing["last_known_boot_time"]
+        logger.info("Continuing to monitor ongoing blackout #%d", blackout_id)
 
     # Enter retry loop
     retry_start = time.time()
@@ -227,11 +268,11 @@ def handle_unreachable():
     while True:
         elapsed = time.time() - retry_start
         if elapsed >= config.MAX_RETRY_DURATION:
-            print(f"[WARN] Max retry duration ({config.MAX_RETRY_DURATION}s) reached, exiting")
-            print("[INFO] Next cron run will pick up monitoring")
+            logger.warning("Max retry duration (%ds) reached, exiting", config.MAX_RETRY_DURATION)
+            logger.info("Next cron run will pick up monitoring")
             break
 
-        print(f"[INFO] Retrying in {config.RETRY_INTERVAL}s... (elapsed: {elapsed:.0f}s)")
+        logger.info("Retrying in %ds... (elapsed: %.0fs)", config.RETRY_INTERVAL, elapsed)
         time.sleep(config.RETRY_INTERVAL)
 
         pi_data = poll_pi()
@@ -244,18 +285,24 @@ def handle_unreachable():
 
             database.log_uptime(retry_now, uptime_seconds, boot_time, was_reachable=True)
 
+            # Determine outage type: compare boot times
+            blackout_type = _determine_blackout_type(last_known_boot_time, boot_time)
+
             duration = _seconds_between(started_at, boot_time)
             if duration < 0:
                 duration = 0
 
-            database.resolve_blackout(blackout_id, boot_time, duration)
-            notifications.notify_blackout_resolved(started_at, boot_time, duration)
-            print(f"[INFO] Power restored! Blackout #{blackout_id} resolved (duration: {duration:.0f}s)")
+            database.resolve_blackout(blackout_id, boot_time, duration, blackout_type)
+            notifications.notify_blackout_resolved(started_at, boot_time, duration, blackout_type)
+            logger.info(
+                "Outage resolved! Blackout #%d (type: %s, duration: %.0fs)",
+                blackout_id, blackout_type, duration,
+            )
             break
         else:
             # Still down, log the attempt
             database.log_uptime(retry_now, None, None, was_reachable=False)
-            print(f"[INFO] Pi still unreachable...")
+            logger.info("Pi still unreachable...")
 
 
 # ---------------------------------------------------------------------------
@@ -263,15 +310,19 @@ def handle_unreachable():
 # ---------------------------------------------------------------------------
 
 def main():
-    print(f"\n{'='*60}")
-    print(f"[{_now_iso()}] Blackout Checker starting")
-    print(f"{'='*60}")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)-8s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    logger.info("Blackout Checker starting")
 
     # Validate configuration
     try:
         config.validate()
     except ValueError as e:
-        print(f"[FATAL] {e}")
+        logger.critical("Configuration error: %s", e)
         sys.exit(1)
 
     # Initialize database
@@ -283,7 +334,7 @@ def main():
 
     # Handle signals for clean exit
     def signal_handler(signum, frame):
-        print(f"\n[INFO] Received signal {signum}, cleaning up...")
+        logger.info("Received signal %d, cleaning up...", signum)
         release_lock()
         sys.exit(0)
 
@@ -299,12 +350,10 @@ def main():
         else:
             handle_unreachable()
     except Exception as e:
-        print(f"[FATAL] Unexpected error: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.critical("Unexpected error: %s", e, exc_info=True)
     finally:
         release_lock()
-        print(f"[{_now_iso()}] Blackout Checker finished")
+        logger.info("Blackout Checker finished")
 
 
 if __name__ == "__main__":
