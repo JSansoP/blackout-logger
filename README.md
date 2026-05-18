@@ -20,7 +20,7 @@ A lightweight, zero-dependency power outage detection system using a Raspberry P
 ```
 
 1. **Raspberry Pi** runs a tiny HTTP server that returns the system's uptime (read from `/proc/uptime`)
-2. **VPS** runs a cron job every 5 minutes that polls the Pi
+2. **VPS** runs a cron job every 10 minutes (default, configurable) that polls the Pi
 3. If the Pi's uptime is lower than expected (it rebooted), a **blackout** is recorded
 4. If the Pi is **unreachable**, the script enters a fast retry loop (every 60s) to pinpoint when power returns
 5. **Telegram notifications** are sent for all blackout events
@@ -87,18 +87,18 @@ Test the checker manually:
 python3 blackout_checker.py
 ```
 
-Install the cron job:
+Install the cron job (accepts an optional argument for interval in minutes, default is 10):
 
 ```bash
-bash setup_cron.sh
+bash setup_cron.sh [minutes]
 ```
 
 Or manually:
 
 ```bash
 crontab -e
-# Add this line:
-*/5 * * * * cd /path/to/blackout-logger && python3 blackout_checker.py >> /var/log/blackout_checker.log 2>&1
+# Add this line (runs every 10 minutes):
+*/10 * * * * cd /path/to/blackout-logger && python3 blackout_checker.py >> /var/log/blackout_checker.log 2>&1
 ```
 
 ### 3. Telegram Bot Setup

@@ -8,8 +8,8 @@ detects power outages, and sends Telegram notifications.
 Usage:
     python3 blackout_checker.py
 
-Designed to be run as a cron job every 5 minutes:
-    */5 * * * * cd /path/to/vps && python3 blackout_checker.py >> /var/log/blackout_checker.log 2>&1
+Designed to be run as a cron job periodically (default every 10 minutes):
+    */10 * * * * cd /path/to/vps && python3 blackout_checker.py >> /var/log/blackout_checker.log 2>&1
 """
 
 import logging
