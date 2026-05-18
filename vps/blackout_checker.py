@@ -140,12 +140,17 @@ def handle_reachable(pi_data):
     uptime_seconds = pi_data["uptime_seconds"]
     boot_time = pi_data["boot_time"]
 
-    # Log the uptime
+    # Fetch previous state BEFORE writing current entry — order matters.
+    # get_last_successful_log() must run first, otherwise it would return
+    # the record we're about to insert and boot_diff would always be 0.
+    ongoing = database.get_ongoing_blackout()
+    last_log = database.get_last_successful_log()
+
+    # Log the current uptime
     database.log_uptime(now, uptime_seconds, boot_time, was_reachable=True)
     logger.info("Pi reachable — uptime: %.0fs, boot: %s", uptime_seconds, boot_time)
 
     # Check for ongoing blackout (from a previous crashed retry loop)
-    ongoing = database.get_ongoing_blackout()
     if ongoing:
         duration = _seconds_between(ongoing["started_at"], boot_time)
         if duration < 0:
@@ -167,8 +172,6 @@ def handle_reachable(pi_data):
         return
 
     # Check for reboot between cron runs
-    last_log = database.get_last_successful_log()
-
     if last_log is None:
         # First run ever, nothing to compare against
         logger.info("First run — no previous data to compare")
