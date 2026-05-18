@@ -116,13 +116,14 @@ crontab -e
 
 ## Notifications
 
-Three types of Telegram notifications:
+The system distinguishes between actual power outages (Pi rebooted) and network issues (Pi unreachable but uptime didn't reset). There are four types of Telegram notifications:
 
 | Event | Emoji | Description |
 |-------|-------|-------------|
-| Detected & Resolved | ⚡ | Blackout happened between cron runs, Pi is already back |
-| In Progress | 🔴 | Pi is currently unreachable, monitoring every 60s |
-| Resolved | 🟢 | Pi came back online after being monitored |
+| Power Outage Detected | ⚡ | Blackout happened between cron runs, Pi is already back |
+| Outage In Progress | 🔴 | Pi is currently unreachable, monitoring every 60s (type unknown yet) |
+| Power Restored | 🟢 | Pi came back online after being unreachable and had rebooted |
+| Connectivity Restored | 🌐 | Pi came back online but never rebooted (internet/network disruption) |
 
 ## Database
 
