@@ -7,8 +7,10 @@ Loads configuration from a .env file (no dependencies required).
 
 import os
 
-# Base directory is where this script lives
+# _BASE_DIR: the vps/ directory (where this script lives)
+# _PROJECT_DIR: the project root (one level up, where .env lives)
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_DIR = os.path.dirname(_BASE_DIR)
 
 
 def _load_env_file(path):
@@ -34,8 +36,8 @@ def _load_env_file(path):
                 os.environ[key] = value
 
 
-# Load .env from the vps directory
-_load_env_file(os.path.join(_BASE_DIR, ".env"))
+# Load .env from the project root (alongside .env.example and README.md)
+_load_env_file(os.path.join(_PROJECT_DIR, ".env"))
 
 # --- Configuration values ---
 
