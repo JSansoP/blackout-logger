@@ -35,21 +35,17 @@ A lightweight, zero-dependency power outage detection system using a Raspberry P
 
 ### 1. Raspberry Pi
 
-Copy the uptime server to your Pi:
+Clone the repo on the Pi:
 
 ```bash
-scp pi/uptime_server.py pi@<PI_TAILSCALE_IP>:~/blackout-logger/
+git clone https://github.com/JSansoP/blackout-logger.git ~/projects/blackout-logger
+cd ~/projects/blackout-logger
 ```
 
-Install and start the systemd service:
+Run the install script — it auto-detects your user and project path, generates the systemd service, and starts it:
 
 ```bash
-# On the Raspberry Pi:
-# Edit the service file if your user is not 'pi' or path differs
-sudo cp blackout-uptime.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable blackout-uptime
-sudo systemctl start blackout-uptime
+bash pi/install.sh
 ```
 
 Verify it's running:
@@ -64,13 +60,13 @@ curl http://localhost:8080/uptime
 Copy the `vps/` directory to your VPS:
 
 ```bash
-scp -r vps/ user@<VPS_IP>:~/blackout-logger/
+scp -r vps/ user@<VPS_IP>:~/projects/blackout-logger/
 ```
 
 Create the configuration:
 
 ```bash
-cd ~/blackout-logger
+cd ~/projects/blackout-logger/vps
 cp ../.env.example .env
 # Edit .env with your values:
 nano .env
@@ -157,7 +153,7 @@ sqlite3 blackout.db "SELECT AVG(duration_seconds) as avg_seconds FROM blackouts 
 blackout-logger/
 ├── pi/
 │   ├── uptime_server.py          # Lightweight HTTP API for the Pi
-│   └── blackout-uptime.service   # systemd service file
+│   └── install.sh                # Generates & installs the systemd service
 ├── vps/
 │   ├── blackout_checker.py       # Main cron script
 │   ├── config.py                 # Configuration loader
