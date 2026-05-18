@@ -2,13 +2,12 @@
 # Blackout Logger — Cron Setup Script
 #
 # Installs a cron job that runs the blackout checker every 5 minutes.
-# Usage: bash setup_cron.sh
-
-set -e
+# Usage: bash vps/setup_cron.sh  (run from the project root)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CHECKER_SCRIPT="$SCRIPT_DIR/blackout_checker.py"
-LOG_FILE="/var/log/blackout_checker.log"
+# Log file lives inside the project directory — no sudo needed
+LOG_FILE="$SCRIPT_DIR/blackout_checker.log"
 
 # Verify the checker script exists
 if [ ! -f "$CHECKER_SCRIPT" ]; then
@@ -33,7 +32,6 @@ if crontab -l 2>/dev/null | grep -q "blackout_checker.py"; then
     read -p "Replace it? (y/N) " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        # Remove existing entry and add new one
         (crontab -l 2>/dev/null | grep -v "blackout_checker.py"; echo "$CRON_LINE") | crontab -
         echo "Cron job updated."
     else
@@ -41,14 +39,9 @@ if crontab -l 2>/dev/null | grep -q "blackout_checker.py"; then
         exit 0
     fi
 else
-    # Add new cron job
     (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -
     echo "Cron job installed."
 fi
-
-# Create log file if it doesn't exist
-sudo touch "$LOG_FILE"
-sudo chown "$(whoami)" "$LOG_FILE"
 
 echo ""
 echo "Cron job: $CRON_LINE"
