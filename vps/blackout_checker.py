@@ -129,87 +129,19 @@ def _seconds_between(iso_start, iso_end):
     return (end - start).total_seconds()
 
 
-def handle_reachable(pi_data):
+def _calculate_boot_time(now_iso, uptime_seconds):
     """
-    Handle the case where the Pi is reachable.
-
-    Logs the uptime, checks for a reboot (blackout between crons),
-    and resolves any ongoing blackout from a previous crashed retry loop.
+    Calculate the estimated boot time in the VPS clock domain.
+    
+    Using the VPS clock reference ensures all timestamps (started_at, ended_at,
+    boot_time, log timestamps) are consistently aligned and immune to clock drift
+    or NTP adjustments on the Raspberry Pi.
     """
-    now = _now_iso()
-    uptime_seconds = pi_data["uptime_seconds"]
-    boot_time = pi_data["boot_time"]
-
-    # Fetch previous state BEFORE writing current entry — order matters.
-    # get_last_successful_log() must run first, otherwise it would return
-    # the record we're about to insert and boot_diff would always be 0.
-    ongoing = database.get_ongoing_blackout()
-    last_log = database.get_last_successful_log()
-
-    # Log the current uptime
-    database.log_uptime(now, uptime_seconds, boot_time, was_reachable=True)
-    logger.info("Pi reachable — uptime: %.0fs, boot: %s", uptime_seconds, boot_time)
-
-    # Check for ongoing blackout (from a previous crashed retry loop)
-    if ongoing:
-        duration = _seconds_between(ongoing["started_at"], boot_time)
-        if duration < 0:
-            duration = 0
-
-        # Determine type: compare current boot_time with the one stored at outage start
-        blackout_type = _determine_blackout_type(
-            ongoing["last_known_boot_time"], boot_time
-        )
-
-        database.resolve_blackout(ongoing["id"], boot_time, duration, blackout_type)
-        notifications.notify_blackout_resolved(
-            ongoing["started_at"], boot_time, duration, blackout_type
-        )
-        logger.info(
-            "Resolved ongoing blackout #%d (type: %s, duration: %.0fs)",
-            ongoing["id"], blackout_type, duration,
-        )
-        return
-
-    # Check for reboot between cron runs
-    if last_log is None:
-        # First run ever, nothing to compare against
-        logger.info("First run — no previous data to compare")
-        return
-
-    previous_boot_time = last_log["boot_time"]
-
-    if previous_boot_time is None:
-        # Previous log didn't have boot_time (shouldn't happen, but be safe)
-        logger.warning("Previous log has no boot_time, skipping comparison")
-        return
-
-    # Compare boot times — if they differ by more than 30 seconds, a reboot happened
-    try:
-        prev_boot = _parse_iso(previous_boot_time)
-        curr_boot = _parse_iso(boot_time)
-        boot_diff = abs((curr_boot - prev_boot).total_seconds())
-    except (ValueError, TypeError) as e:
-        logger.warning("Could not compare boot times: %s", e)
-        return
-
-    if boot_diff > 30:
-        # Reboot detected — a blackout happened between cron runs (always power)
-        started_at = last_log["timestamp"]  # last time we saw the Pi alive
-        ended_at = boot_time                 # when the Pi booted back up
-        duration = _seconds_between(started_at, ended_at)
-
-        # Duration could be negative if clocks are slightly off; clamp to 0
-        if duration < 0:
-            duration = 0
-
-        database.create_blackout(
-            now, started_at, ended_at, duration,
-            blackout_type="power",
-            last_known_boot_time=previous_boot_time,
-        )
-        notifications.notify_blackout_detected_resolved(started_at, ended_at, duration)
-        logger.info("Power outage detected between crons! ~%.0fs (boot_diff: %.0fs)", duration, boot_diff)
+    if uptime_seconds is None:
+        return None
+    now_dt = _parse_iso(now_iso)
+    boot_dt = now_dt - timedelta(seconds=uptime_seconds)
+    return boot_dt.isoformat()
 
 
 def _determine_blackout_type(last_known_boot_time, current_boot_time):
@@ -230,6 +162,92 @@ def _determine_blackout_type(last_known_boot_time, current_boot_time):
         return "power" if boot_diff > 30 else "internet"
     except (ValueError, TypeError):
         return "unknown"
+
+
+def handle_reachable(pi_data):
+    """
+    Handle the case where the Pi is reachable.
+
+    Logs the uptime, checks for a reboot (blackout between crons),
+    and resolves any ongoing blackout from a previous crashed retry loop.
+    """
+    now = _now_iso()
+    uptime_seconds = pi_data["uptime_seconds"]
+    boot_time = _calculate_boot_time(now, uptime_seconds)
+
+    # Fetch previous state BEFORE writing current entry — order matters.
+    # get_last_successful_log() must run first, otherwise it would return
+    # the record we're about to insert and boot_diff would always be 0.
+    ongoing = database.get_ongoing_blackout()
+    last_log = database.get_last_successful_log()
+
+    # Log the current uptime
+    database.log_uptime(now, uptime_seconds, boot_time, was_reachable=True)
+    logger.info("Pi reachable — uptime: %.0fs, boot: %s", uptime_seconds, boot_time)
+
+    # Check for ongoing blackout (from a previous crashed retry loop)
+    if ongoing:
+        # Determine type: compare current boot_time with the one stored at outage start
+        blackout_type = _determine_blackout_type(
+            ongoing["last_known_boot_time"], boot_time
+        )
+        ended_at = boot_time if blackout_type == "power" else now
+        duration = _seconds_between(ongoing["started_at"], ended_at)
+        if duration < 0:
+            duration = 0
+
+        database.resolve_blackout(ongoing["id"], ended_at, duration, blackout_type)
+        notifications.notify_blackout_resolved(
+            ongoing["started_at"], ended_at, duration, blackout_type
+        )
+        logger.info(
+            "Resolved ongoing blackout #%d (type: %s, duration: %.0fs)",
+            ongoing["id"], blackout_type, duration,
+        )
+        return
+
+    # Check for reboot between cron runs
+    if last_log is None:
+        # First run ever, nothing to compare against
+        logger.info("First run — no previous data to compare")
+        return
+
+    previous_boot_time = last_log["boot_time"]
+    previous_uptime = last_log["uptime_seconds"]
+
+    if previous_boot_time is None:
+        # Previous log didn't have boot_time (shouldn't happen, but be safe)
+        logger.warning("Previous log has no boot_time, skipping comparison")
+        return
+
+    # Compare boot times and uptime — if boot times differ by > 30s or uptime reset,
+    # a reboot happened between cron polls.
+    try:
+        prev_boot = _parse_iso(previous_boot_time)
+        curr_boot = _parse_iso(boot_time)
+        boot_diff = abs((curr_boot - prev_boot).total_seconds())
+        uptime_reset = previous_uptime is not None and (uptime_seconds < previous_uptime - 5)
+    except (ValueError, TypeError) as e:
+        logger.warning("Could not compare boot times: %s", e)
+        return
+
+    if boot_diff > 30 or uptime_reset:
+        # Reboot detected — a blackout happened between cron runs (always power)
+        started_at = last_log["timestamp"]  # last time we saw the Pi alive
+        ended_at = boot_time                 # when the Pi booted back up (VPS clock domain)
+        duration = _seconds_between(started_at, ended_at)
+
+        # Duration could be negative if clocks are slightly off; clamp to 0
+        if duration < 0:
+            duration = 0
+
+        database.create_blackout(
+            now, started_at, ended_at, duration,
+            blackout_type="power",
+            last_known_boot_time=previous_boot_time,
+        )
+        notifications.notify_blackout_detected_resolved(started_at, ended_at, duration)
+        logger.info("Power outage detected between crons! ~%.0fs (boot_diff: %.0fs)", duration, boot_diff)
 
 
 def handle_unreachable():
@@ -283,20 +301,21 @@ def handle_unreachable():
 
         if pi_data is not None:
             # Pi is back!
-            boot_time = pi_data["boot_time"]
             uptime_seconds = pi_data["uptime_seconds"]
+            boot_time = _calculate_boot_time(retry_now, uptime_seconds)
 
             database.log_uptime(retry_now, uptime_seconds, boot_time, was_reachable=True)
 
             # Determine outage type: compare boot times
             blackout_type = _determine_blackout_type(last_known_boot_time, boot_time)
 
-            duration = _seconds_between(started_at, boot_time)
+            ended_at = boot_time if blackout_type == "power" else retry_now
+            duration = _seconds_between(started_at, ended_at)
             if duration < 0:
                 duration = 0
 
-            database.resolve_blackout(blackout_id, boot_time, duration, blackout_type)
-            notifications.notify_blackout_resolved(started_at, boot_time, duration, blackout_type)
+            database.resolve_blackout(blackout_id, ended_at, duration, blackout_type)
+            notifications.notify_blackout_resolved(started_at, ended_at, duration, blackout_type)
             logger.info(
                 "Outage resolved! Blackout #%d (type: %s, duration: %.0fs)",
                 blackout_id, blackout_type, duration,
