@@ -39,6 +39,7 @@ Power outage detector: a Raspberry Pi 5 at home exposes its uptime, a VPS polls 
 - Lint: `uvx ruff check vps pi` (user-level ruff config, stricter than defaults). The two catch-all `except Exception` blocks (Telegram send, Pi HTTP handler) are deliberate and marked `# noqa: BLE001`.
 - Telegram messages use emojis by design; logs, comments and docstrings do not.
 - The repo uses `core.autocrlf`; LF/CRLF warnings on commit are expected.
+- Every page's top bar starts with a `.home-link` back to `http://personal-vps/home/` (absolute URL, because this UI is served from a different host than some of the other dashboards). Keep it when editing the top bar.
 
 ## Deployment
 

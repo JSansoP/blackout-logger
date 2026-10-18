@@ -134,6 +134,21 @@ a { color: inherit; }
 
 .brand svg { width: 22px; height: 22px; color: var(--power); }
 
+.home-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: -8px;
+  padding: 4px 8px;
+  color: var(--ink-2);
+  font-size: 14px;
+  font-weight: 550;
+  text-decoration: none;
+  border-radius: var(--radius-s);
+}
+.home-link:hover { color: var(--ink); background: var(--sunken); }
+.home-link svg { width: 16px; height: 16px; }
+
 .topbar-end {
   margin-left: auto;
   display: flex;
