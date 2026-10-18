@@ -1,172 +1,172 @@
 # ⚡ Blackout Logger
 
-A lightweight, zero-dependency power outage detection system using a Raspberry Pi as a sensor and a VPS as the monitor.
+A lightweight, zero-dependency power outage detector. A Raspberry Pi at home acts as the sensor and a VPS acts as the monitor: the VPS polls the Pi's uptime, detects power cuts and network outages, stores them in SQLite and sends Telegram notifications.
 
 ## How It Works
 
 ```
-┌─────────────────┐          ┌─────────────────────┐
+┌─────────────────┐          ┌──────────────────────┐
 │  Raspberry Pi   │◄─────────│     VPS (cron)       │
 │  (at home)      │  HTTP    │                      │
-│                 │  GET     │  blackout_checker.py  │
-│  uptime_server  │─────────►│  ┌──────────────┐    │
-│  port 8080      │  JSON    │  │  SQLite DB    │    │──── Telegram
-│                 │          │  │  ┌──────────┐ │    │     Notifications
-└─────────────────┘          │  │  │ uptimes  │ │    │
-     Tailscale               │  │  │ blackouts│ │    │
-                             │  │  └──────────┘ │    │
-                             │  └──────────────┘    │
-                             └─────────────────────┘
+│                 │  GET     │  blackout_checker.py │
+│  uptime_server  │─────────►│  ┌───────────────┐   │
+│  port 8080      │  JSON    │  │  SQLite DB    │   │──── Telegram
+│                 │          │  │  uptime_logs  │   │     notifications
+└─────────────────┘          │  │  blackouts    │   │
+     Tailscale               │  └───────────────┘   │
+                             └──────────────────────┘
 ```
 
-1. **Raspberry Pi** runs a tiny HTTP server that returns the system's uptime (read from `/proc/uptime`)
-2. **VPS** runs a cron job every 10 minutes (default, configurable) that polls the Pi
-3. If the Pi's uptime is lower than expected (it rebooted), a **blackout** is recorded
-4. If the Pi is **unreachable**, the script enters a fast retry loop (every 60s) to pinpoint when power returns
-5. **Telegram notifications** are sent for all blackout events
+1. The **Raspberry Pi** runs a tiny HTTP server that returns its uptime, read from `/proc/uptime`.
+2. The **VPS** runs a cron job every 10 minutes (configurable) that polls the Pi and computes the Pi's boot time as *poll time minus uptime*, using only the VPS clock.
+3. If the boot time moved by more than 30 seconds since the last poll, the Pi rebooted: a **power outage** happened between polls.
+4. If the Pi is **unreachable**, a blackout is opened and the checker retries every 60 seconds (for up to 1 hour per run) to pinpoint when it comes back. When it does, the boot time tells whether it was a **power** outage (Pi rebooted) or an **internet** outage (Pi kept running).
+5. If an outage lasts more than 8 hours, the Pi is assumed to be **stuck** in standby (see below) and the blackout is closed with an unknown duration.
+6. **Telegram notifications** are sent for every event.
 
 ## Prerequisites
 
-- Python 3.7+ on both machines (no pip packages needed!)
-- Both machines connected via [Tailscale](https://tailscale.com/)
-- A Telegram bot (create one via [@BotFather](https://t.me/BotFather))
+- Python 3.11+ on both machines. No third-party packages are needed.
+- Both machines connected via [Tailscale](https://tailscale.com/). Disable key expiry for both nodes in the Tailscale admin console: an expired key on the VPS looks like an endless outage.
+- A Telegram bot (create one via [@BotFather](https://t.me/BotFather)).
 
 ## Setup
 
 ### 1. Raspberry Pi
 
-Clone the repo on the Pi:
+```bash
+git clone https://github.com/JSansoP/blackout-logger.git ~/projects/blackout-logger
+cd ~/projects/blackout-logger
+bash pi/install.sh
+```
+
+`install.sh` detects the current user and path, generates the `blackout-uptime` systemd service and starts it. Verify it:
+
+```bash
+curl http://localhost:8080/uptime
+# {"uptime_seconds": 1234.56, "boot_time": "...", "hostname": "raspberrypi", "timestamp": "..."}
+```
+
+Only `uptime_seconds` is used by the VPS. `boot_time` and `timestamp` come from the Pi's own clock, which is unreliable after a power cut, and are ignored.
+
+To restart the service after updating the Pi code: `bash pi/restart.sh`.
+
+### 2. VPS
 
 ```bash
 git clone https://github.com/JSansoP/blackout-logger.git ~/projects/blackout-logger
 cd ~/projects/blackout-logger
-```
-
-Run the install script — it auto-detects your user and project path, generates the systemd service, and starts it:
-
-```bash
-bash pi/install.sh
-```
-
-Verify it's running:
-
-```bash
-curl http://localhost:8080/uptime
-# {"uptime_seconds": 1234.56, "boot_time": "2026-05-18T...", "hostname": "raspberrypi", ...}
-```
-
-### 2. VPS
-
-Copy the `vps/` directory to your VPS:
-
-```bash
-scp -r vps/ user@<VPS_IP>:~/projects/blackout-logger/
-```
-
-Create the configuration:
-
-```bash
-cd ~/projects/blackout-logger/vps
-cp ../.env.example .env
-# Edit .env with your values:
+cp .env.example .env
 nano .env
 ```
 
-Required `.env` values:
+The `.env` file lives at the project root. Main settings:
 
-| Variable | Description | Example |
+| Variable | Description | Default |
 |----------|-------------|---------|
-| `PI_ADDRESS` | Tailscale IP of your Pi | `100.64.0.5` |
-| `PI_PORT` | Port the uptime server listens on | `8080` |
-| `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather | `123456:ABC-DEF...` |
-| `TELEGRAM_CHAT_ID` | Your chat/channel ID | `-1001234567890` |
+| `PI_ADDRESS` | Tailscale IP of the Pi (required) | |
+| `PI_PORT` | Port of the uptime server | `8080` |
+| `POLL_TIMEOUT` | Seconds to wait for the Pi | `10` |
+| `RETRY_INTERVAL` | Seconds between retries while the Pi is unreachable | `60` |
+| `MAX_RETRY_DURATION` | Max seconds of retrying per cron run | `3600` |
+| `MAX_BLACKOUT_DURATION` | Outages longer than this are closed as `stuck` | `28800` (8 h) |
+| `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather (required) | |
+| `TELEGRAM_CHAT_ID` | Chat or channel ID (required) | |
+| `DB_PATH` | SQLite database path | `vps/blackout.db` |
+| `LOCK_FILE` | PID lock file | `/tmp/blackout_checker.lock` |
 
-Test the checker manually:
-
-```bash
-python3 blackout_checker.py
-```
-
-Install the cron job (accepts an optional argument for interval in minutes, default is 10):
-
-```bash
-bash setup_cron.sh [minutes]
-```
-
-Or manually:
+Test the checker manually, then install the cron job (optional interval in minutes, default 10):
 
 ```bash
-crontab -e
-# Add this line (runs every 10 minutes):
-*/10 * * * * cd /path/to/blackout-logger && python3 blackout_checker.py >> /var/log/blackout_checker.log 2>&1
+python3 vps/blackout_checker.py
+bash vps/setup_cron.sh [minutes]
 ```
 
-### 3. Telegram Bot Setup
+The cron job writes its log to `vps/blackout_checker.log`.
 
-1. Message [@BotFather](https://t.me/BotFather) on Telegram
-2. Send `/newbot` and follow the prompts
-3. Copy the bot token to your `.env` file
-4. Create a new channel or group for notifications
-5. Add your bot as an admin to the channel
-6. Get the chat ID:
-   - Send a message in the channel
-   - Visit `https://api.telegram.org/bot<TOKEN>/getUpdates`
-   - Find the `chat.id` value (it will be negative for channels)
-7. Add the chat ID to your `.env` file
+### 3. Telegram Bot
+
+1. Message [@BotFather](https://t.me/BotFather) and send `/newbot`.
+2. Copy the bot token to `.env`.
+3. Create a channel or group and add the bot as an admin.
+4. Send a message there, open `https://api.telegram.org/bot<TOKEN>/getUpdates` and copy the `chat.id` value (negative for channels) to `.env`.
 
 ## Notifications
 
-The system distinguishes between actual power outages (Pi rebooted) and network issues (Pi unreachable but uptime didn't reset). There are these Telegram notifications:
-
 | Event | Emoji | Description |
 |-------|-------|-------------|
-| Power Outage Detected | ⚡ | Blackout happened between cron runs, Pi is already back |
-| Outage In Progress | 🔴 | Pi is currently unreachable, monitoring every 60s (type unknown yet) |
-| Power Restored | 🟢 | Pi came back online after being unreachable and had rebooted |
-| Connectivity Restored | 🌐 | Pi came back online but never rebooted (internet/network disruption) |
-| Outage Resolved | 🟢 | Pi answered with an unusable response, type unknown |
-| Pi Probably Stuck | 🟥 | Unreachable for over `MAX_BLACKOUT_DURATION` (default 8 hours) |
-| Pi Back Online | 🟢 | Pi reachable again after being marked stuck, with its boot time |
+| Power Grid Outage Detected | ⚡ | The Pi rebooted between cron runs and is already back |
+| Ongoing Outage Detected | 🔴 | The Pi is unreachable right now (type not known yet) |
+| Power Restored | 🟢 | The Pi came back after being unreachable and had rebooted |
+| Connectivity Restored | 🌐 | The Pi came back but never rebooted (internet/network disruption) |
+| Outage Resolved | 🟢 | The Pi answered with an unusable response, type unknown |
+| Pi Probably Stuck | 🟥 | Unreachable for over `MAX_BLACKOUT_DURATION` |
+| Pi Back Online | 🟢 | The Pi is reachable again after being marked stuck, with its boot time |
 
-A Raspberry Pi 5 can stay in standby (red LED) when power returns for a split second during an outage and drops again; it then needs a power-cycle or a press of its power button. Blackouts that exceed `MAX_BLACKOUT_DURATION` are therefore closed with type `stuck` and no end time or duration, and no new blackout is opened until the Pi is seen again.
+### Stuck Pi
+
+A Raspberry Pi 5 can stay in standby (red LED) when power returns for a split second during an outage and drops again. This is a hardware protection and cannot be configured; the Pi needs a power-cycle or a press of its power button. Blackouts that exceed `MAX_BLACKOUT_DURATION` are therefore closed with type `stuck` and no end time or duration, and no new blackout is opened until the Pi is seen again. A UPS, or a smart plug that powers on with a delay after an outage, prevents the problem.
 
 ## Database
 
-The SQLite database (`blackout.db`) has two tables:
+The SQLite database has two tables:
 
-- **`uptime_logs`** — Every poll attempt with timestamp, uptime, and reachability
-- **`blackouts`** — Detected power outages with start/end times and duration
+- **`uptime_logs`**: every poll, with VPS timestamp, Pi uptime, computed boot time and reachability.
+- **`blackouts`**: detected outages with start, end, duration and type (`power`, `internet`, `unknown` or `stuck`).
 
-Query examples:
+Outage start is the last successful poll, so durations are an upper bound that can include up to one cron interval.
 
 ```bash
-# View all blackouts
-sqlite3 blackout.db "SELECT * FROM blackouts ORDER BY started_at DESC;"
+# All blackouts
+sqlite3 vps/blackout.db "SELECT * FROM blackouts ORDER BY started_at DESC;"
 
-# View blackouts from the last 30 days
-sqlite3 blackout.db "SELECT * FROM blackouts WHERE started_at > datetime('now', '-30 days') ORDER BY started_at DESC;"
+# Blackouts per month and type
+sqlite3 vps/blackout.db "SELECT strftime('%Y-%m', started_at) AS month, blackout_type, COUNT(*) FROM blackouts GROUP BY month, blackout_type;"
 
-# Count blackouts per month
-sqlite3 blackout.db "SELECT strftime('%Y-%m', started_at) as month, COUNT(*) as count FROM blackouts GROUP BY month;"
-
-# Average blackout duration
-sqlite3 blackout.db "SELECT AVG(duration_seconds) as avg_seconds FROM blackouts WHERE resolved = 1;"
+# Average duration of power outages (stuck ones have no duration and are excluded)
+sqlite3 vps/blackout.db "SELECT AVG(duration_seconds) FROM blackouts WHERE resolved = 1 AND blackout_type = 'power';"
 ```
+
+To recompute type, end and duration of resolved blackouts from the stored uptime logs (dry run by default):
+
+```bash
+cd vps
+python3 recompute_blackouts.py          # show changes
+python3 recompute_blackouts.py --apply  # write them
+```
+
+## Development
+
+Tests and linting run locally with `uv`; the project itself has no dependencies.
+
+```bash
+cd vps
+uv run --no-project --with pytest pytest -q
+cd ..
+uvx ruff check vps pi
+```
+
+On a server without pytest: `cd vps && python3 -m unittest test_blackout_logic test_recompute_blackouts`.
 
 ## Project Structure
 
 ```
 blackout-logger/
 ├── pi/
-│   ├── uptime_server.py          # Lightweight HTTP API for the Pi
-│   └── install.sh                # Generates & installs the systemd service
+│   ├── uptime_server.py           # HTTP API exposing the Pi's uptime
+│   ├── install.sh                 # Generates and installs the systemd service
+│   └── restart.sh                 # Restarts the service
 ├── vps/
-│   ├── blackout_checker.py       # Main cron script
-│   ├── config.py                 # Configuration loader
-│   ├── database.py               # SQLite database layer
-│   ├── notifications.py          # Telegram notifications
-│   └── setup_cron.sh             # Cron installation helper
-├── .env.example                  # Configuration template
+│   ├── blackout_checker.py        # Cron entry point: polling and outage detection
+│   ├── config.py                  # .env loader and settings
+│   ├── database.py                # SQLite schema, migrations and queries
+│   ├── notifications.py           # Telegram messages
+│   ├── recompute_blackouts.py     # One-off recomputation of resolved blackouts
+│   ├── setup_cron.sh              # Cron installation helper
+│   ├── test_blackout_logic.py
+│   └── test_recompute_blackouts.py
+├── .env.example                   # Configuration template
+├── CLAUDE.md                      # Architecture and design notes
 └── README.md
 ```
 
