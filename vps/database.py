@@ -5,8 +5,9 @@ Blackout Logger — Database
 SQLite database management for uptime logs and blackout records.
 """
 
+import contextlib
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta
 
 from config import DB_PATH
 
@@ -57,17 +58,44 @@ def init_db():
     try:
         conn.executescript(_SCHEMA)
         conn.commit()
-        # Run migrations safely — each one is idempotent (ALTER TABLE is a no-op if
-        # the column already exists in SQLite, but SQLite raises OperationalError instead).
-        # We catch that error and continue.
-        for migration in _MIGRATIONS:
-            try:
-                conn.execute(migration)
-                conn.commit()
-            except Exception:
-                pass  # Column already exists
+        _add_missing_columns(conn)
+        if conn.execute("PRAGMA user_version").fetchone()[0] < 1:
+            _recompute_boot_times_from_vps_clock(conn)
+            conn.execute("PRAGMA user_version = 1")
+            conn.commit()
     finally:
         conn.close()
+
+
+def _add_missing_columns(conn):
+    """Apply column migrations; SQLite raises OperationalError for columns that already exist."""
+    for migration in _MIGRATIONS:
+        with contextlib.suppress(sqlite3.OperationalError):
+            conn.execute(migration)
+            conn.commit()
+
+
+def _recompute_boot_times_from_vps_clock(conn):
+    """Rewrite stored boot times as poll timestamp minus uptime, both from the VPS clock."""
+    rows = conn.execute(
+        """SELECT id, timestamp, uptime_seconds FROM uptime_logs
+           WHERE was_reachable = 1 AND uptime_seconds IS NOT NULL"""
+    ).fetchall()
+    for row in rows:
+        boot_dt = datetime.fromisoformat(row["timestamp"]) - timedelta(seconds=row["uptime_seconds"])
+        conn.execute(
+            "UPDATE uptime_logs SET boot_time = ? WHERE id = ?",
+            (boot_dt.isoformat(), row["id"]),
+        )
+    conn.execute(
+        """UPDATE blackouts SET last_known_boot_time = (
+               SELECT boot_time FROM uptime_logs
+               WHERE uptime_logs.timestamp = blackouts.started_at AND was_reachable = 1
+               ORDER BY id DESC LIMIT 1)
+           WHERE EXISTS (
+               SELECT 1 FROM uptime_logs
+               WHERE uptime_logs.timestamp = blackouts.started_at AND was_reachable = 1)"""
+    )
 
 
 def log_uptime(timestamp, uptime_seconds, boot_time, was_reachable=True):

@@ -10,11 +10,11 @@ Usage:
     python3 uptime_server.py [--port PORT] [--bind ADDRESS]
 """
 
+import argparse
 import json
 import socket
-import argparse
-from datetime import datetime, timezone, timedelta
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from datetime import UTC, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
 def get_uptime_seconds():
@@ -25,7 +25,7 @@ def get_uptime_seconds():
 
 def get_boot_time(uptime_seconds):
     """Calculate the boot time from the current time and uptime."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     boot_time = now - timedelta(seconds=uptime_seconds)
     return boot_time.isoformat()
 
@@ -36,7 +36,7 @@ class UptimeHandler(BaseHTTPRequestHandler):
     # Suppress default stderr logging for each request to reduce noise.
     # Override log_message to use a simpler format.
     def log_message(self, format, *args):
-        print(f"[{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}] {args[0]}")
+        print(f"[{datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')}] {args[0]}")
 
     def do_GET(self):
         if self.path == "/uptime" or self.path == "/uptime/":
@@ -53,7 +53,7 @@ class UptimeHandler(BaseHTTPRequestHandler):
                 "uptime_seconds": round(uptime_seconds, 2),
                 "boot_time": get_boot_time(uptime_seconds),
                 "hostname": socket.gethostname(),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
             }
             self._send_json(response, 200)
         except FileNotFoundError:
@@ -61,7 +61,7 @@ class UptimeHandler(BaseHTTPRequestHandler):
                 {"error": "/proc/uptime not available (not running on Linux?)"},
                 500,
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             self._send_json({"error": str(e)}, 500)
 
     def _handle_health(self):
@@ -93,7 +93,7 @@ def main():
     server = HTTPServer((args.bind, args.port), UptimeHandler)
     print(f"Uptime server running on {args.bind}:{args.port}")
     print(f"Hostname: {socket.gethostname()}")
-    print(f"Endpoints: GET /uptime, GET /health")
+    print("Endpoints: GET /uptime, GET /health")
 
     try:
         server.serve_forever()

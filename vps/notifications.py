@@ -8,8 +8,8 @@ Uses urllib (stdlib) — no dependencies required.
 
 import json
 import logging
-import urllib.request
 import urllib.error
+import urllib.request
 
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 
@@ -54,7 +54,7 @@ def _send_telegram(message):
     except urllib.error.URLError as e:
         logger.error("Failed to send Telegram notification: %s", e)
         return False
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.error("Unexpected error sending Telegram notification: %s", e)
         return False
 

@@ -12,15 +12,16 @@ Designed to be run as a cron job periodically (default every 10 minutes):
     */10 * * * * cd /path/to/vps && python3 blackout_checker.py >> /var/log/blackout_checker.log 2>&1
 """
 
-import logging
-import os
-import sys
 import json
-import time
+import logging
+import math
+import os
 import signal
-import urllib.request
+import sys
+import time
 import urllib.error
-from datetime import datetime, timezone, timedelta
+import urllib.request
+from datetime import UTC, datetime, timedelta
 
 import config
 import database
@@ -62,7 +63,7 @@ def acquire_lock():
             else:
                 logger.warning("Stale lock file found (PID %d is dead), cleaning up", old_pid)
                 os.remove(lock_file)
-        except (ValueError, IOError):
+        except (OSError, ValueError):
             # Corrupted lock file, remove it
             logger.warning("Corrupted lock file, cleaning up")
             os.remove(lock_file)
@@ -79,7 +80,7 @@ def release_lock():
     try:
         if os.path.exists(config.LOCK_FILE):
             os.remove(config.LOCK_FILE)
-    except IOError:
+    except OSError:
         pass
 
 
@@ -87,22 +88,52 @@ def release_lock():
 # Pi API communication
 # ---------------------------------------------------------------------------
 
+REBOOT_THRESHOLD_SECONDS = 30
+
+
+class InvalidPiResponse(Exception):
+    """The Pi answered, but the response cannot be used to read its uptime."""
+
+
+def _parse_uptime(data):
+    """Extract a valid uptime in seconds from the Pi's JSON payload."""
+    if not isinstance(data, dict):
+        raise InvalidPiResponse(f"unexpected payload: {data!r}")
+    uptime = data.get("uptime_seconds")
+    if isinstance(uptime, bool) or not isinstance(uptime, (int, float)):
+        raise InvalidPiResponse(f"invalid uptime_seconds: {uptime!r}")
+    if not math.isfinite(uptime) or uptime < 0:
+        raise InvalidPiResponse(f"invalid uptime_seconds: {uptime!r}")
+    return float(uptime)
+
+
 def poll_pi():
     """
     Poll the Raspberry Pi's uptime API.
 
     Returns:
-        dict with uptime data if reachable, None if unreachable.
+        Uptime in seconds if the Pi answered correctly, None if it is unreachable.
+
+    Raises:
+        InvalidPiResponse: the Pi answered with an HTTP error or an unusable body.
     """
     url = f"http://{config.PI_ADDRESS}:{config.PI_PORT}/uptime"
     try:
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=config.POLL_TIMEOUT) as response:
-            data = json.loads(response.read().decode("utf-8"))
-            return data
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError, json.JSONDecodeError) as e:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        raise InvalidPiResponse(f"HTTP {e.code}") from e
+    except (urllib.error.URLError, OSError) as e:
         logger.warning("Pi unreachable: %s", e)
         return None
+    except UnicodeDecodeError as e:
+        raise InvalidPiResponse(f"undecodable body: {e}") from e
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as e:
+        raise InvalidPiResponse(f"malformed JSON: {e}") from e
+    return _parse_uptime(data)
 
 
 # ---------------------------------------------------------------------------
@@ -111,12 +142,11 @@ def poll_pi():
 
 def _now_iso():
     """Get current UTC time as ISO 8601 string."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _parse_iso(iso_string):
     """Parse an ISO 8601 string to a datetime object."""
-    # Handle both with and without timezone info
     if iso_string.endswith("Z"):
         iso_string = iso_string[:-1] + "+00:00"
     return datetime.fromisoformat(iso_string)
@@ -124,47 +154,94 @@ def _parse_iso(iso_string):
 
 def _seconds_between(iso_start, iso_end):
     """Calculate seconds between two ISO 8601 timestamps."""
-    start = _parse_iso(iso_start)
-    end = _parse_iso(iso_end)
-    return (end - start).total_seconds()
+    return (_parse_iso(iso_end) - _parse_iso(iso_start)).total_seconds()
 
 
 def _calculate_boot_time(now_iso, uptime_seconds):
     """
-    Calculate the estimated boot time in the VPS clock domain.
-    
-    Using the VPS clock reference ensures all timestamps (started_at, ended_at,
-    boot_time, log timestamps) are consistently aligned and immune to clock drift
-    or NTP adjustments on the Raspberry Pi.
+    Calculate the Pi's boot time as VPS poll time minus Pi uptime.
+
+    All stored timestamps come from the VPS clock, so they are comparable with
+    each other regardless of the Pi's (battery-less) system clock.
     """
-    if uptime_seconds is None:
-        return None
-    now_dt = _parse_iso(now_iso)
-    boot_dt = now_dt - timedelta(seconds=uptime_seconds)
+    boot_dt = _parse_iso(now_iso) - timedelta(seconds=uptime_seconds)
     return boot_dt.isoformat()
+
+
+def _pi_rebooted(previous_boot_time, current_boot_time):
+    """
+    Return True if the boot time moved by more than the threshold, False if not,
+    or None if the boot times are missing or unparsable.
+    """
+    if not previous_boot_time or not current_boot_time:
+        return None
+    try:
+        boot_diff = abs(_seconds_between(previous_boot_time, current_boot_time))
+    except (ValueError, TypeError) as e:
+        logger.warning("Could not compare boot times: %s", e)
+        return None
+    return boot_diff > REBOOT_THRESHOLD_SECONDS
 
 
 def _determine_blackout_type(last_known_boot_time, current_boot_time):
     """
-    Compare boot times to determine whether the outage was a power cut or internet disruption.
+    Classify an outage from the boot times before and after it.
 
     Returns:
-        'power'    — boot time changed, Pi rebooted (power grid outage)
-        'internet' — boot time unchanged, Pi never went down (network disruption)
+        'power'    — the Pi rebooted (power grid outage)
+        'internet' — the Pi kept running (network disruption)
         'unknown'  — could not compare (missing data)
     """
-    if not last_known_boot_time or not current_boot_time:
+    rebooted = _pi_rebooted(last_known_boot_time, current_boot_time)
+    if rebooted is None:
         return "unknown"
-    try:
-        prev = _parse_iso(last_known_boot_time)
-        curr = _parse_iso(current_boot_time)
-        boot_diff = abs((curr - prev).total_seconds())
-        return "power" if boot_diff > 30 else "internet"
-    except (ValueError, TypeError):
-        return "unknown"
+    return "power" if rebooted else "internet"
 
 
-def handle_reachable(pi_data):
+def _outage_end(started_at, blackout_type, boot_time, now):
+    """
+    Return (ended_at, duration_seconds) for an outage.
+
+    Power outages end at the Pi's boot time, other outages when the Pi is seen again.
+    If the boot time precedes the start, the poll time is used as an upper bound.
+    """
+    ended_at = boot_time if blackout_type == "power" else now
+    duration = _seconds_between(started_at, ended_at)
+    if duration < 0:
+        logger.warning(
+            "Outage end %s precedes start %s; using poll time %s as end",
+            ended_at, started_at, now,
+        )
+        ended_at = now
+        duration = max(_seconds_between(started_at, now), 0.0)
+    return ended_at, duration
+
+
+def _resolve_blackout(blackout, ended_at, duration, blackout_type):
+    """Mark a blackout as resolved and notify."""
+    database.resolve_blackout(blackout["id"], ended_at, duration, blackout_type)
+    notifications.notify_blackout_resolved(blackout["started_at"], ended_at, duration, blackout_type)
+    logger.info(
+        "Resolved blackout #%d (type: %s, duration: %.0fs)",
+        blackout["id"], blackout_type, duration,
+    )
+
+
+def _resolve_with_uptime(blackout, uptime_seconds, now):
+    """Resolve a blackout using the uptime read when the Pi came back."""
+    boot_time = _calculate_boot_time(now, uptime_seconds)
+    blackout_type = _determine_blackout_type(blackout["last_known_boot_time"], boot_time)
+    ended_at, duration = _outage_end(blackout["started_at"], blackout_type, boot_time, now)
+    _resolve_blackout(blackout, ended_at, duration, blackout_type)
+
+
+def _resolve_without_uptime(blackout, now):
+    """Resolve a blackout when the Pi answers but its uptime is unavailable."""
+    duration = max(_seconds_between(blackout["started_at"], now), 0.0)
+    _resolve_blackout(blackout, now, duration, "unknown")
+
+
+def handle_reachable(uptime_seconds):
     """
     Handle the case where the Pi is reachable.
 
@@ -172,82 +249,48 @@ def handle_reachable(pi_data):
     and resolves any ongoing blackout from a previous crashed retry loop.
     """
     now = _now_iso()
-    uptime_seconds = pi_data["uptime_seconds"]
     boot_time = _calculate_boot_time(now, uptime_seconds)
 
-    # Fetch previous state BEFORE writing current entry — order matters.
-    # get_last_successful_log() must run first, otherwise it would return
-    # the record we're about to insert and boot_diff would always be 0.
     ongoing = database.get_ongoing_blackout()
     last_log = database.get_last_successful_log()
 
-    # Log the current uptime
     database.log_uptime(now, uptime_seconds, boot_time, was_reachable=True)
     logger.info("Pi reachable — uptime: %.0fs, boot: %s", uptime_seconds, boot_time)
 
-    # Check for ongoing blackout (from a previous crashed retry loop)
     if ongoing:
-        # Determine type: compare current boot_time with the one stored at outage start
-        blackout_type = _determine_blackout_type(
-            ongoing["last_known_boot_time"], boot_time
-        )
-        ended_at = boot_time if blackout_type == "power" else now
-        duration = _seconds_between(ongoing["started_at"], ended_at)
-        if duration < 0:
-            duration = 0
-
-        database.resolve_blackout(ongoing["id"], ended_at, duration, blackout_type)
-        notifications.notify_blackout_resolved(
-            ongoing["started_at"], ended_at, duration, blackout_type
-        )
-        logger.info(
-            "Resolved ongoing blackout #%d (type: %s, duration: %.0fs)",
-            ongoing["id"], blackout_type, duration,
-        )
+        _resolve_with_uptime(ongoing, uptime_seconds, now)
         return
 
-    # Check for reboot between cron runs
     if last_log is None:
-        # First run ever, nothing to compare against
         logger.info("First run — no previous data to compare")
         return
 
     previous_boot_time = last_log["boot_time"]
-    previous_uptime = last_log["uptime_seconds"]
-
-    if previous_boot_time is None:
-        # Previous log didn't have boot_time (shouldn't happen, but be safe)
-        logger.warning("Previous log has no boot_time, skipping comparison")
+    if not _pi_rebooted(previous_boot_time, boot_time):
         return
 
-    # Compare boot times and uptime — if boot times differ by > 30s or uptime reset,
-    # a reboot happened between cron polls.
-    try:
-        prev_boot = _parse_iso(previous_boot_time)
-        curr_boot = _parse_iso(boot_time)
-        boot_diff = abs((curr_boot - prev_boot).total_seconds())
-        uptime_reset = previous_uptime is not None and (uptime_seconds < previous_uptime - 5)
-    except (ValueError, TypeError) as e:
-        logger.warning("Could not compare boot times: %s", e)
-        return
+    started_at = last_log["timestamp"]
+    ended_at, duration = _outage_end(started_at, "power", boot_time, now)
+    database.create_blackout(
+        now, started_at, ended_at, duration,
+        blackout_type="power",
+        last_known_boot_time=previous_boot_time,
+    )
+    notifications.notify_blackout_detected_resolved(started_at, ended_at, duration)
+    logger.info("Power outage detected between crons! ~%.0fs", duration)
 
-    if boot_diff > 30 or uptime_reset:
-        # Reboot detected — a blackout happened between cron runs (always power)
-        started_at = last_log["timestamp"]  # last time we saw the Pi alive
-        ended_at = boot_time                 # when the Pi booted back up (VPS clock domain)
-        duration = _seconds_between(started_at, ended_at)
 
-        # Duration could be negative if clocks are slightly off; clamp to 0
-        if duration < 0:
-            duration = 0
+def handle_invalid_response(error):
+    """
+    Handle a Pi that answers with an unusable response.
 
-        database.create_blackout(
-            now, started_at, ended_at, duration,
-            blackout_type="power",
-            last_known_boot_time=previous_boot_time,
-        )
-        notifications.notify_blackout_detected_resolved(started_at, ended_at, duration)
-        logger.info("Power outage detected between crons! ~%.0fs (boot_diff: %.0fs)", duration, boot_diff)
+    The Pi is online, so an ongoing blackout is resolved with an unknown type.
+    """
+    now = _now_iso()
+    logger.error("Pi answered with an invalid response: %s", error)
+    ongoing = database.get_ongoing_blackout()
+    if ongoing:
+        _resolve_without_uptime(ongoing, now)
 
 
 def handle_unreachable():
@@ -258,18 +301,13 @@ def handle_unreachable():
     and enters a retry loop until the Pi comes back or MAX_RETRY_DURATION is exceeded.
     """
     now = _now_iso()
-
-    # Log the failed attempt
     database.log_uptime(now, None, None, was_reachable=False)
 
-    # Check if there's already an ongoing blackout
     ongoing = database.get_ongoing_blackout()
-    last_successful = database.get_last_successful_log()
-    started_at = last_successful["timestamp"] if last_successful else now
-    last_known_boot_time = last_successful["boot_time"] if last_successful else None
-
     if ongoing is None:
-        # New blackout — create record and notify
+        last_successful = database.get_last_successful_log()
+        started_at = last_successful["timestamp"] if last_successful else now
+        last_known_boot_time = last_successful["boot_time"] if last_successful else None
         blackout_id = database.create_blackout(
             detected_at=now,
             started_at=started_at,
@@ -277,13 +315,10 @@ def handle_unreachable():
         )
         notifications.notify_blackout_in_progress(started_at)
         logger.info("Outage detected! Pi unreachable. Created blackout #%d", blackout_id)
+        ongoing = database.get_ongoing_blackout()
     else:
-        blackout_id = ongoing["id"]
-        started_at = ongoing["started_at"]
-        last_known_boot_time = ongoing["last_known_boot_time"]
-        logger.info("Continuing to monitor ongoing blackout #%d", blackout_id)
+        logger.info("Continuing to monitor ongoing blackout #%d", ongoing["id"])
 
-    # Enter retry loop
     retry_start = time.time()
 
     while True:
@@ -296,35 +331,22 @@ def handle_unreachable():
         logger.info("Retrying in %ds... (elapsed: %.0fs)", config.RETRY_INTERVAL, elapsed)
         time.sleep(config.RETRY_INTERVAL)
 
-        pi_data = poll_pi()
+        try:
+            uptime_seconds = poll_pi()
+        except InvalidPiResponse as e:
+            logger.error("Pi answered with an invalid response: %s", e)
+            _resolve_without_uptime(ongoing, _now_iso())
+            break
         retry_now = _now_iso()
 
-        if pi_data is not None:
-            # Pi is back!
-            uptime_seconds = pi_data["uptime_seconds"]
+        if uptime_seconds is not None:
             boot_time = _calculate_boot_time(retry_now, uptime_seconds)
-
             database.log_uptime(retry_now, uptime_seconds, boot_time, was_reachable=True)
-
-            # Determine outage type: compare boot times
-            blackout_type = _determine_blackout_type(last_known_boot_time, boot_time)
-
-            ended_at = boot_time if blackout_type == "power" else retry_now
-            duration = _seconds_between(started_at, ended_at)
-            if duration < 0:
-                duration = 0
-
-            database.resolve_blackout(blackout_id, ended_at, duration, blackout_type)
-            notifications.notify_blackout_resolved(started_at, ended_at, duration, blackout_type)
-            logger.info(
-                "Outage resolved! Blackout #%d (type: %s, duration: %.0fs)",
-                blackout_id, blackout_type, duration,
-            )
+            _resolve_with_uptime(ongoing, uptime_seconds, retry_now)
             break
-        else:
-            # Still down, log the attempt
-            database.log_uptime(retry_now, None, None, was_reachable=False)
-            logger.info("Pi still unreachable...")
+
+        database.log_uptime(retry_now, None, None, was_reachable=False)
+        logger.info("Pi still unreachable...")
 
 
 # ---------------------------------------------------------------------------
@@ -365,10 +387,14 @@ def main():
 
     try:
         # Poll the Pi
-        pi_data = poll_pi()
+        try:
+            uptime_seconds = poll_pi()
+        except InvalidPiResponse as e:
+            handle_invalid_response(e)
+            return
 
-        if pi_data is not None:
-            handle_reachable(pi_data)
+        if uptime_seconds is not None:
+            handle_reachable(uptime_seconds)
         else:
             handle_unreachable()
     except Exception as e:
