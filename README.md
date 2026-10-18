@@ -75,6 +75,7 @@ The `.env` file lives at the project root. Main settings:
 | `TELEGRAM_CHAT_ID` | Chat or channel ID (required) | |
 | `DB_PATH` | SQLite database path | `vps/blackout.db` |
 | `LOCK_FILE` | PID lock file | `/tmp/blackout_checker.lock` |
+| `HEARTBEAT_URL` | [heartbeat-monitor](https://github.com/JSansoP/heartbeat-monitor) ping URL, e.g. `http://127.0.0.1:8091/ping/blackout-checker`; empty disables it | |
 
 Test the checker manually, then install the cron job (optional interval in minutes, default 10):
 
@@ -84,6 +85,8 @@ bash vps/setup_cron.sh [minutes]
 ```
 
 The cron job writes its log to `vps/blackout_checker.log`.
+
+When `HEARTBEAT_URL` is set, every run pings `<url>/start` first (also runs that exit because another run holds the lock), `<url>` when it finishes, and `<url>/fail` on a configuration or unexpected error. Pings use a 5 s timeout and errors are only logged, so the checker never depends on the monitor.
 
 ### 3. Dashboard (optional)
 
@@ -164,7 +167,7 @@ cd ..
 uvx ruff check vps pi
 ```
 
-On a server without pytest: `cd vps && python3 -m unittest test_blackout_logic test_recompute_blackouts test_web_server`.
+On a server without pytest: `cd vps && python3 -m unittest test_blackout_logic test_heartbeat test_recompute_blackouts test_web_server`.
 
 To preview the dashboard locally against a copy of the database: `DB_PATH=/path/to/blackout.db python3 vps/web_server.py` and open `http://127.0.0.1:8090/`.
 
@@ -179,6 +182,7 @@ blackout-logger/
 ├── vps/
 │   ├── blackout_checker.py        # Cron entry point: polling and outage detection
 │   ├── config.py                  # .env loader and settings
+│   ├── heartbeat.py               # Optional pings to heartbeat-monitor
 │   ├── database.py                # SQLite schema, migrations and queries
 │   ├── notifications.py           # Telegram messages
 │   ├── recompute_blackouts.py     # One-off recomputation of resolved blackouts
@@ -187,6 +191,7 @@ blackout-logger/
 │   ├── install_web.sh             # Installs the dashboard service and Tailscale Serve route
 │   ├── web/                       # Dashboard frontend (HTML, CSS, JS, Archivo font)
 │   ├── test_blackout_logic.py
+│   ├── test_heartbeat.py
 │   ├── test_recompute_blackouts.py
 │   └── test_web_server.py
 ├── .env.example                   # Configuration template

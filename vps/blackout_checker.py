@@ -25,6 +25,7 @@ from datetime import UTC, datetime, timedelta
 
 import config
 import database
+import heartbeat
 import notifications
 
 logger = logging.getLogger(__name__)
@@ -406,12 +407,14 @@ def main():
     )
 
     logger.info("Blackout Checker starting")
+    heartbeat.send("start")
 
     # Validate configuration
     try:
         config.validate()
     except ValueError as e:
         logger.critical("Configuration error: %s", e)
+        heartbeat.send("fail")
         sys.exit(1)
 
     # Initialize database
@@ -436,14 +439,16 @@ def main():
             uptime_seconds = poll_pi()
         except InvalidPiResponse as e:
             handle_invalid_response(e)
-            return
-
-        if uptime_seconds is not None:
-            handle_reachable(uptime_seconds)
         else:
-            handle_unreachable()
+            if uptime_seconds is not None:
+                handle_reachable(uptime_seconds)
+            else:
+                handle_unreachable()
     except Exception as e:
         logger.critical("Unexpected error: %s", e, exc_info=True)
+        heartbeat.send("fail")
+    else:
+        heartbeat.send()
     finally:
         release_lock()
         logger.info("Blackout Checker finished")

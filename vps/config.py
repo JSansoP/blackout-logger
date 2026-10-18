@@ -60,6 +60,9 @@ DB_PATH = os.environ.get("DB_PATH", os.path.join(_BASE_DIR, "blackout.db"))
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
+# heartbeat-monitor ping URL, e.g. http://127.0.0.1:8091/ping/blackout-checker (empty disables it)
+HEARTBEAT_URL = os.environ.get("HEARTBEAT_URL", "")
+
 # Lock file
 LOCK_FILE = os.environ.get("LOCK_FILE", "/tmp/blackout_checker.lock")
 
