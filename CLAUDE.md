@@ -13,6 +13,8 @@ Power outage detector: a Raspberry Pi 5 at home exposes its uptime, a VPS polls 
 - `vps/notifications.py`: Telegram Bot API via `urllib`.
 - `vps/config.py`: reads `.env` from the project root (not `vps/`); existing environment variables win.
 - `vps/recompute_blackouts.py`: one-off recomputation of resolved blackouts; dry run unless `--apply`.
+- `vps/web_server.py`: read-only dashboard (`ThreadingHTTPServer`), `GET /`, `/static/*` (files in `vps/web/`), `/api/status`, `/api/blackouts?days=N`. Runs as the `blackout-web` systemd service on `127.0.0.1:8090`. Reuses `blackout_checker._is_unanswered_stuck_blackout` for the `stuck` state instead of re-deriving it.
+- `vps/web/`: plain HTML/CSS/JS, no build step. Same visual system as speedtest-logger (Archivo variable font, same color tokens, readouts, panels, tables) but a single page. The distinctive element is the outage map: one row per local day, outages placed by time of day.
 
 ## Design decisions
 
@@ -25,6 +27,8 @@ Power outage detector: a Raspberry Pi 5 at home exposes its uptime, a VPS polls 
 - **Stuck Pi.** A Pi 5 can stay in standby (red LED) after a sub-second power blip during an outage; hardware behavior, not configurable. Once an open blackout exceeds `MAX_BLACKOUT_DURATION` (default 8 h) it is resolved as type `stuck` with `ended_at` and `duration_seconds` NULL. While the latest blackout is `stuck` and no successful poll exists after its `started_at`, unreachable runs only log the poll (no new blackout, no retry loop), and the first successful poll sends a single "back online" notification instead of creating a between-crons power record.
 - **Concurrency.** Cron runs can overlap with a long retry loop; a PID lock file (`LOCK_FILE`) makes later runs exit. A run that dies leaves the blackout open and the next run continues it.
 - **Migrations.** Column additions are idempotent `ALTER TABLE` statements with `OperationalError` suppressed. Data migrations are versioned with `PRAGMA user_version` (v1: recompute all boot times from the VPS clock). Add new data migrations as the next version.
+- **Dashboard is read-only and tailnet-only.** No auth: it binds to localhost and is exposed only through Tailscale Serve. Status `stale` means no poll in 30 min (cron not running, or an invalid-response run, which logs nothing). For `stuck` rows the API adds `seen_again_at` (first successful poll after the start) so the UI can bound the unknown period.
+- **Relative URLs in the frontend.** Tailscale Serve strips the `/blackouts` mount path, so the page uses relative `static/` and `api/` URLs and an inline script redirects `/blackouts` to `/blackouts/`.
 - **History rewrites go through scripts** with a dry-run default (`recompute_blackouts.py`), never silent migrations. The recompute skips `stuck` blackouts.
 
 ## Conventions
@@ -37,6 +41,7 @@ Power outage detector: a Raspberry Pi 5 at home exposes its uptime, a VPS polls 
 ## Deployment
 
 - VPS: `root@personal-vps`, repo at `/root/projects/blackout-logger`, `.env` at the repo root, DB `vps/blackout.db`, log `vps/blackout_checker.log`. Cron: `*/10 * * * * cd .../vps && /usr/bin/python3 .../vps/blackout_checker.py >> .../vps/blackout_checker.log 2>&1`. Deploy with `git pull`; the next cron run picks it up. Back up `blackout.db` before data changes.
+- Dashboard: installed with `bash vps/install_web.sh` (service `blackout-web`, port 8090, `tailscale serve --http=80 --set-path=/blackouts`). URL: `http://personal-vps/blackouts/`. Restart the service after changes to Python files; `vps/web/` changes only need a reload.
 - Pi: `sanso@pi-nas`, repo at `/home/sanso/projects/blackout-logger`, service `blackout-uptime`. Restart only when `pi/` changes: a poll during the restart opens a short false `internet` blackout.
 
 ## Known pitfalls

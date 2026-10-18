@@ -23,6 +23,7 @@ A lightweight, zero-dependency power outage detector. A Raspberry Pi at home act
 4. If the Pi is **unreachable**, a blackout is opened and the checker retries every 60 seconds (for up to 1 hour per run) to pinpoint when it comes back. When it does, the boot time tells whether it was a **power** outage (Pi rebooted) or an **internet** outage (Pi kept running).
 5. If an outage lasts more than 8 hours, the Pi is assumed to be **stuck** in standby (see below) and the blackout is closed with an unknown duration.
 6. **Telegram notifications** are sent for every event.
+7. A small **web dashboard** on the VPS shows the current status and recent outages.
 
 ## Prerequisites
 
@@ -84,7 +85,24 @@ bash vps/setup_cron.sh [minutes]
 
 The cron job writes its log to `vps/blackout_checker.log`.
 
-### 3. Telegram Bot
+### 3. Dashboard (optional)
+
+A read-only dashboard shows whether the Pi is online, the last outage, and the outages of the last 7, 30 or 90 days drawn by day and time of day. It is served by `vps/web_server.py` (stdlib only) on `127.0.0.1:8090` and published on the tailnet with [Tailscale Serve](https://tailscale.com/kb/1312/serve):
+
+```bash
+bash vps/install_web.sh [port] [path]   # defaults: 8090 /blackouts
+```
+
+The script installs the `blackout-web` systemd service and runs `tailscale serve --bg --http=80 --set-path=/blackouts http://127.0.0.1:8090`, so the dashboard is at `http://<vps-hostname>/blackouts/` for devices in the tailnet only. After pulling changes to `vps/web_server.py`, run `systemctl restart blackout-web`; changes in `vps/web/` only need a browser reload.
+
+API, used by the page:
+
+| Endpoint | Returns |
+|----------|---------|
+| `GET /api/status` | `state` (`online`, `offline`, `stuck`, `no_data`), `since`, `stale` (no check in 30 min), last poll, open and latest blackout |
+| `GET /api/blackouts?days=30` | Blackouts that started in the last `days` days (1 to 3650) plus any open one, newest first |
+
+### 4. Telegram Bot
 
 1. Message [@BotFather](https://t.me/BotFather) and send `/newbot`.
 2. Copy the bot token to `.env`.
@@ -146,7 +164,9 @@ cd ..
 uvx ruff check vps pi
 ```
 
-On a server without pytest: `cd vps && python3 -m unittest test_blackout_logic test_recompute_blackouts`.
+On a server without pytest: `cd vps && python3 -m unittest test_blackout_logic test_recompute_blackouts test_web_server`.
+
+To preview the dashboard locally against a copy of the database: `DB_PATH=/path/to/blackout.db python3 vps/web_server.py` and open `http://127.0.0.1:8090/`.
 
 ## Project Structure
 
@@ -163,8 +183,12 @@ blackout-logger/
 │   ├── notifications.py           # Telegram messages
 │   ├── recompute_blackouts.py     # One-off recomputation of resolved blackouts
 │   ├── setup_cron.sh              # Cron installation helper
+│   ├── web_server.py              # Read-only dashboard server and JSON API
+│   ├── install_web.sh             # Installs the dashboard service and Tailscale Serve route
+│   ├── web/                       # Dashboard frontend (HTML, CSS, JS, Archivo font)
 │   ├── test_blackout_logic.py
-│   └── test_recompute_blackouts.py
+│   ├── test_recompute_blackouts.py
+│   └── test_web_server.py
 ├── .env.example                   # Configuration template
 ├── CLAUDE.md                      # Architecture and design notes
 └── README.md

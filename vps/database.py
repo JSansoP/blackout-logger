@@ -231,3 +231,40 @@ def resolve_blackout(blackout_id, ended_at, duration_seconds, blackout_type="unk
         conn.commit()
     finally:
         conn.close()
+
+
+def get_last_log():
+    """Get the most recent uptime log, reachable or not, or None."""
+    conn = _connect()
+    try:
+        return conn.execute("SELECT * FROM uptime_logs ORDER BY id DESC LIMIT 1").fetchone()
+    finally:
+        conn.close()
+
+
+def get_first_successful_log_after(iso_timestamp):
+    """Get the earliest reachable uptime log strictly after a timestamp, or None."""
+    conn = _connect()
+    try:
+        return conn.execute(
+            """SELECT * FROM uptime_logs
+               WHERE was_reachable = 1 AND timestamp > ?
+               ORDER BY timestamp ASC LIMIT 1""",
+            (iso_timestamp,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def get_blackouts_since(iso_timestamp, limit):
+    """Get blackouts that started at or after a timestamp, or are still open, newest first."""
+    conn = _connect()
+    try:
+        return conn.execute(
+            """SELECT * FROM blackouts
+               WHERE started_at >= ? OR resolved = 0
+               ORDER BY started_at DESC LIMIT ?""",
+            (iso_timestamp, limit),
+        ).fetchall()
+    finally:
+        conn.close()
