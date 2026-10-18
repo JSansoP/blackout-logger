@@ -196,6 +196,20 @@ def get_ongoing_blackout():
         conn.close()
 
 
+def get_latest_blackout():
+    """
+    Get the most recently created blackout record, resolved or not.
+
+    Returns:
+        sqlite3.Row or None.
+    """
+    conn = _connect()
+    try:
+        return conn.execute("SELECT * FROM blackouts ORDER BY id DESC LIMIT 1").fetchone()
+    finally:
+        conn.close()
+
+
 def resolve_blackout(blackout_id, ended_at, duration_seconds, blackout_type="unknown"):
     """
     Mark a blackout as resolved.

@@ -116,7 +116,7 @@ crontab -e
 
 ## Notifications
 
-The system distinguishes between actual power outages (Pi rebooted) and network issues (Pi unreachable but uptime didn't reset). There are four types of Telegram notifications:
+The system distinguishes between actual power outages (Pi rebooted) and network issues (Pi unreachable but uptime didn't reset). There are these Telegram notifications:
 
 | Event | Emoji | Description |
 |-------|-------|-------------|
@@ -124,6 +124,11 @@ The system distinguishes between actual power outages (Pi rebooted) and network 
 | Outage In Progress | 🔴 | Pi is currently unreachable, monitoring every 60s (type unknown yet) |
 | Power Restored | 🟢 | Pi came back online after being unreachable and had rebooted |
 | Connectivity Restored | 🌐 | Pi came back online but never rebooted (internet/network disruption) |
+| Outage Resolved | 🟢 | Pi answered with an unusable response, type unknown |
+| Pi Probably Stuck | 🟥 | Unreachable for over `MAX_BLACKOUT_DURATION` (default 8 hours) |
+| Pi Back Online | 🟢 | Pi reachable again after being marked stuck, with its boot time |
+
+A Raspberry Pi 5 can stay in standby (red LED) when power returns for a split second during an outage and drops again; it then needs a power-cycle or a press of its power button. Blackouts that exceed `MAX_BLACKOUT_DURATION` are therefore closed with type `stuck` and no end time or duration, and no new blackout is opened until the Pi is seen again.
 
 ## Database
 

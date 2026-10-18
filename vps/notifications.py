@@ -130,6 +130,40 @@ def notify_blackout_in_progress(last_seen):
     return _send_telegram(message)
 
 
+def notify_pi_probably_stuck(started_at, threshold_seconds):
+    """
+    Notification type 4: outage exceeded the maximum duration, Pi assumed stuck in standby.
+    """
+    message = (
+        "🟥 *Pi Probably Stuck*\n"
+        "\n"
+        f"The Raspberry Pi has been unreachable for over {_format_duration(threshold_seconds)}.\n"
+        "It is likely stuck in standby (red LED) after a power flicker.\n"
+        "\n"
+        f"🔴 Last seen online: {_format_time(started_at)}\n"
+        "🔌 Power-cycle it or press its power button.\n"
+        "\n"
+        "The outage was closed with an unknown duration. "
+        "You will be notified when the Pi is back."
+    )
+    return _send_telegram(message)
+
+
+def notify_back_after_stuck(started_at, boot_time):
+    """
+    Notification type 5: Pi reachable again after an outage marked as stuck.
+    """
+    message = (
+        "🟢 *Pi Back Online*\n"
+        "\n"
+        "The Raspberry Pi is reachable again after being marked as stuck.\n"
+        "\n"
+        f"🔴 Last seen online: {_format_time(started_at)}\n"
+        f"🔄 Booted at: ~{_format_time(boot_time)}"
+    )
+    return _send_telegram(message)
+
+
 def notify_blackout_resolved(started_at, ended_at, duration_seconds, blackout_type="unknown"):
     """
     Notification type 3: Pi came back online after being unreachable (retry loop resolved).

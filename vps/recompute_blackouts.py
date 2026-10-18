@@ -29,7 +29,10 @@ def _first_reachable_log_after(conn, timestamp):
 def compute_changes(conn):
     """Return a list of (blackout_row, new_values) for resolved blackouts that would change."""
     changes = []
-    blackouts = conn.execute("SELECT * FROM blackouts WHERE resolved = 1 ORDER BY id").fetchall()
+    blackouts = conn.execute(
+        "SELECT * FROM blackouts WHERE resolved = 1 AND blackout_type != ? ORDER BY id",
+        (blackout_checker.STUCK_TYPE,),
+    ).fetchall()
     for blackout in blackouts:
         recovery = _first_reachable_log_after(conn, blackout["started_at"])
         if recovery is None:

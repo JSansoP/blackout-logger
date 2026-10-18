@@ -50,6 +50,9 @@ POLL_TIMEOUT = int(os.environ.get("POLL_TIMEOUT", "10"))
 RETRY_INTERVAL = int(os.environ.get("RETRY_INTERVAL", "60"))
 MAX_RETRY_DURATION = int(os.environ.get("MAX_RETRY_DURATION", "3600"))
 
+# Blackouts longer than this are assumed to be a Pi stuck in standby
+MAX_BLACKOUT_DURATION = int(os.environ.get("MAX_BLACKOUT_DURATION", "28800"))
+
 # Database
 DB_PATH = os.environ.get("DB_PATH", os.path.join(_BASE_DIR, "blackout.db"))
 

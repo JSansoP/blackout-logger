@@ -89,6 +89,7 @@ def release_lock():
 # ---------------------------------------------------------------------------
 
 REBOOT_THRESHOLD_SECONDS = 30
+STUCK_TYPE = "stuck"
 
 
 class InvalidPiResponse(Exception):
@@ -241,6 +242,35 @@ def _resolve_without_uptime(blackout, now):
     _resolve_blackout(blackout, now, duration, "unknown")
 
 
+def _mark_stuck_if_too_long(blackout, now):
+    """
+    Resolve a blackout as 'stuck' with unknown end and duration once it exceeds
+    MAX_BLACKOUT_DURATION, and return whether it did.
+    """
+    if _seconds_between(blackout["started_at"], now) <= config.MAX_BLACKOUT_DURATION:
+        return False
+    database.resolve_blackout(blackout["id"], None, None, STUCK_TYPE)
+    notifications.notify_pi_probably_stuck(blackout["started_at"], config.MAX_BLACKOUT_DURATION)
+    logger.warning(
+        "Blackout #%d exceeded %ds, marked as stuck with unknown duration",
+        blackout["id"], config.MAX_BLACKOUT_DURATION,
+    )
+    return True
+
+
+def _is_unanswered_stuck_blackout(blackout, last_successful_log):
+    """True if the blackout was marked stuck and the Pi has not been seen since it started."""
+    if blackout is None or blackout["blackout_type"] != STUCK_TYPE:
+        return False
+    if last_successful_log is None:
+        return True
+    return _seconds_between(last_successful_log["timestamp"], blackout["started_at"]) >= 0
+
+
+def _awaiting_return_from_stuck():
+    return _is_unanswered_stuck_blackout(database.get_latest_blackout(), database.get_last_successful_log())
+
+
 def handle_reachable(uptime_seconds):
     """
     Handle the case where the Pi is reachable.
@@ -263,6 +293,12 @@ def handle_reachable(uptime_seconds):
 
     if last_log is None:
         logger.info("First run — no previous data to compare")
+        return
+
+    stuck = database.get_latest_blackout()
+    if _is_unanswered_stuck_blackout(stuck, last_log):
+        notifications.notify_back_after_stuck(stuck["started_at"], boot_time)
+        logger.info("Pi back online after stuck blackout #%d (booted %s)", stuck["id"], boot_time)
         return
 
     previous_boot_time = last_log["boot_time"]
@@ -304,6 +340,10 @@ def handle_unreachable():
     database.log_uptime(now, None, None, was_reachable=False)
 
     ongoing = database.get_ongoing_blackout()
+    if ongoing is None and _awaiting_return_from_stuck():
+        logger.info("Pi still unreachable after being marked stuck, waiting for it to return")
+        return
+
     if ongoing is None:
         last_successful = database.get_last_successful_log()
         started_at = last_successful["timestamp"] if last_successful else now
@@ -318,6 +358,9 @@ def handle_unreachable():
         ongoing = database.get_ongoing_blackout()
     else:
         logger.info("Continuing to monitor ongoing blackout #%d", ongoing["id"])
+
+    if _mark_stuck_if_too_long(ongoing, now):
+        return
 
     retry_start = time.time()
 
@@ -347,6 +390,8 @@ def handle_unreachable():
 
         database.log_uptime(retry_now, None, None, was_reachable=False)
         logger.info("Pi still unreachable...")
+        if _mark_stuck_if_too_long(ongoing, retry_now):
+            break
 
 
 # ---------------------------------------------------------------------------

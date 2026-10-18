@@ -459,5 +459,95 @@ class TestInvalidResponseHandling(DatabaseTestCase):
         mock_invalid.assert_called_once()
 
 
+class TestStuckPi(DatabaseTestCase):
+    T_SEEN = "2026-08-25T10:00:00+00:00"
+
+    def setUp(self):
+        super().setUp()
+        database.log_uptime(self.T_SEEN, 1000.0, blackout_checker._calculate_boot_time(self.T_SEEN, 1000.0))
+
+    def _run_unreachable(self, now):
+        with patch("blackout_checker._now_iso", return_value=now), \
+             patch.object(blackout_checker.config, "MAX_RETRY_DURATION", 0), \
+             patch("notifications.notify_blackout_in_progress") as in_progress, \
+             patch("notifications.notify_pi_probably_stuck") as stuck:
+            blackout_checker.handle_unreachable()
+        return in_progress, stuck
+
+    def test_blackout_over_threshold_is_marked_stuck_with_unknown_duration(self):
+        database.create_blackout(detected_at=self.T_SEEN, started_at=self.T_SEEN, last_known_boot_time="x")
+
+        _, stuck = self._run_unreachable("2026-08-25T18:00:01+00:00")
+
+        stuck.assert_called_once_with(self.T_SEEN, 28800)
+        row = self._fetch_all("blackouts")[0]
+        self.assertEqual(row["resolved"], 1)
+        self.assertEqual(row["blackout_type"], "stuck")
+        self.assertIsNone(row["ended_at"])
+        self.assertIsNone(row["duration_seconds"])
+
+    def test_blackout_under_threshold_stays_open(self):
+        database.create_blackout(detected_at=self.T_SEEN, started_at=self.T_SEEN, last_known_boot_time="x")
+
+        _, stuck = self._run_unreachable("2026-08-25T17:59:59+00:00")
+
+        stuck.assert_not_called()
+        self.assertIsNotNone(database.get_ongoing_blackout())
+
+    def test_threshold_reached_inside_retry_loop(self):
+        database.create_blackout(detected_at=self.T_SEEN, started_at=self.T_SEEN, last_known_boot_time="x")
+
+        with patch("blackout_checker._now_iso", side_effect=["2026-08-25T17:59:00+00:00", "2026-08-25T18:01:00+00:00"]), \
+             patch("blackout_checker.poll_pi", side_effect=[None, AssertionError("loop should have stopped")]), \
+             patch("time.sleep", return_value=None), \
+             patch("notifications.notify_pi_probably_stuck") as stuck:
+            blackout_checker.handle_unreachable()
+
+        stuck.assert_called_once()
+        self.assertEqual(database.get_latest_blackout()["blackout_type"], "stuck")
+
+    def test_no_new_blackout_while_still_stuck(self):
+        database.create_blackout(detected_at=self.T_SEEN, started_at=self.T_SEEN, last_known_boot_time="x")
+        self._run_unreachable("2026-08-25T18:00:01+00:00")
+
+        with patch("blackout_checker._now_iso", return_value="2026-08-25T18:10:00+00:00"), \
+             patch("blackout_checker.poll_pi", side_effect=AssertionError("must not retry")), \
+             patch("notifications.notify_blackout_in_progress") as in_progress:
+            blackout_checker.handle_unreachable()
+
+        in_progress.assert_not_called()
+        self.assertEqual(len(self._fetch_all("blackouts")), 1)
+
+    def test_return_after_stuck_notifies_once_without_new_blackout(self):
+        database.create_blackout(detected_at=self.T_SEEN, started_at=self.T_SEEN, last_known_boot_time="x")
+        self._run_unreachable("2026-08-25T18:00:01+00:00")
+
+        with patch("blackout_checker._now_iso", return_value="2026-08-26T12:00:00+00:00"), \
+             patch("notifications.notify_back_after_stuck") as back, \
+             patch("notifications.notify_blackout_detected_resolved") as detected:
+            blackout_checker.handle_reachable(600.0)
+
+        back.assert_called_once_with(self.T_SEEN, "2026-08-26T11:50:00+00:00")
+        detected.assert_not_called()
+        self.assertEqual(len(self._fetch_all("blackouts")), 1)
+
+        with patch("blackout_checker._now_iso", return_value="2026-08-26T12:10:00+00:00"), \
+             patch("notifications.notify_back_after_stuck") as back_again:
+            blackout_checker.handle_reachable(1200.0)
+        back_again.assert_not_called()
+
+    def test_new_outage_after_return_opens_blackout_normally(self):
+        database.create_blackout(detected_at=self.T_SEEN, started_at=self.T_SEEN, last_known_boot_time="x")
+        self._run_unreachable("2026-08-25T18:00:01+00:00")
+        with patch("blackout_checker._now_iso", return_value="2026-08-26T12:00:00+00:00"), \
+             patch("notifications.notify_back_after_stuck"):
+            blackout_checker.handle_reachable(600.0)
+
+        in_progress, _ = self._run_unreachable("2026-08-26T12:10:00+00:00")
+
+        in_progress.assert_called_once_with("2026-08-26T12:00:00+00:00")
+        self.assertIsNotNone(database.get_ongoing_blackout())
+
+
 if __name__ == "__main__":
     unittest.main()
