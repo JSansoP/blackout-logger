@@ -2,7 +2,8 @@
 # Blackout Logger — Dashboard Install Script
 #
 # Installs the blackout-web systemd service (read-only dashboard on 127.0.0.1)
-# and publishes it on the tailnet at http://<vps-hostname>/<path> with Tailscale Serve.
+# The VPS reverse proxy (Caddy, home-dashboard deploy/Caddyfile) publishes it on the
+# WireGuard VPN at http://personal-vps/<path>.
 #
 # Usage (run from the repo root on the VPS):
 #   bash vps/install_web.sh [port] [path]
@@ -29,7 +30,7 @@ echo "Installing Blackout Logger dashboard..."
 echo "  User:     $CURRENT_USER"
 echo "  Script:   $SCRIPT_DIR/web_server.py"
 echo "  Listen:   127.0.0.1:$PORT"
-echo "  Tailnet:  http://<this-host>$SERVE_PATH"
+echo "  VPN:      http://personal-vps$SERVE_PATH/ (route in home-dashboard deploy/Caddyfile)"
 
 $SUDO tee "$SERVICE_FILE" > /dev/null <<EOF
 [Unit]
@@ -63,8 +64,5 @@ $SUDO systemctl daemon-reload
 $SUDO systemctl enable "$SERVICE_NAME"
 $SUDO systemctl restart "$SERVICE_NAME"
 
-$SUDO tailscale serve --bg --http=80 --set-path="$SERVE_PATH" "http://127.0.0.1:$PORT"
-
 echo ""
 $SUDO systemctl status "$SERVICE_NAME" --no-pager -l | head -5
-$SUDO tailscale serve status

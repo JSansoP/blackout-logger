@@ -71,7 +71,7 @@ def validate():
     """Validate that required configuration values are set."""
     errors = []
     if not PI_ADDRESS:
-        errors.append("PI_ADDRESS is required (Tailscale IP of the Raspberry Pi)")
+        errors.append("PI_ADDRESS is required (WireGuard IP of the Raspberry Pi)")
     if not TELEGRAM_BOT_TOKEN:
         errors.append("TELEGRAM_BOT_TOKEN is required")
     if not TELEGRAM_CHAT_ID:

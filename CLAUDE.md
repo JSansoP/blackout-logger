@@ -29,8 +29,8 @@ Power outage detector: a Raspberry Pi 5 at home exposes its uptime, a VPS polls 
 - **Heartbeats never affect the checker.** 5 s timeout, every exception caught and logged, nothing sent when `HEARTBEAT_URL` is empty. The monitor treats `/start` pings as alive, so a one-hour retry loop (later runs only ping `/start`) does not look dead; it alerts if a run has not finished after its `max_runtime` (75 min). The invalid-response branch must fall through to the success ping, not `return` early.
 - **Concurrency.** Cron runs can overlap with a long retry loop; a PID lock file (`LOCK_FILE`) makes later runs exit. A run that dies leaves the blackout open and the next run continues it.
 - **Migrations.** Column additions are idempotent `ALTER TABLE` statements with `OperationalError` suppressed. Data migrations are versioned with `PRAGMA user_version` (v1: recompute all boot times from the VPS clock). Add new data migrations as the next version.
-- **Dashboard is read-only and tailnet-only.** No auth: it binds to localhost and is exposed only through Tailscale Serve. Status `stale` means no poll in 30 min (cron not running, or an invalid-response run, which logs nothing). For `stuck` rows the API adds `seen_again_at` (first successful poll after the start) so the UI can bound the unknown period.
-- **Relative URLs in the frontend.** Tailscale Serve strips the `/blackouts` mount path, so the page uses relative `static/` and `api/` URLs and an inline script redirects `/blackouts` to `/blackouts/`.
+- **Dashboard is read-only and VPN-only.** No auth: it binds to localhost and is exposed only through Caddy on the WireGuard IP. Status `stale` means no poll in 30 min (cron not running, or an invalid-response run, which logs nothing). For `stuck` rows the API adds `seen_again_at` (first successful poll after the start) so the UI can bound the unknown period.
+- **Relative URLs in the frontend.** The reverse proxy strips the `/blackouts` mount path, so the page uses relative `static/` and `api/` URLs and an inline script redirects `/blackouts` to `/blackouts/`.
 - **History rewrites go through scripts** with a dry-run default (`recompute_blackouts.py`), never silent migrations. The recompute skips `stuck` blackouts.
 
 ## Conventions
@@ -44,11 +44,11 @@ Power outage detector: a Raspberry Pi 5 at home exposes its uptime, a VPS polls 
 ## Deployment
 
 - VPS: `root@personal-vps`, repo at `/root/projects/blackout-logger`, `.env` at the repo root (includes `HEARTBEAT_URL=http://127.0.0.1:8091/ping/blackout-checker`), DB `vps/blackout.db`, log `vps/blackout_checker.log`. Cron: `*/10 * * * * cd .../vps && /usr/bin/python3 .../vps/blackout_checker.py >> .../vps/blackout_checker.log 2>&1`. Deploy with `git pull`; the next cron run picks it up. Back up `blackout.db` before data changes.
-- Dashboard: installed with `bash vps/install_web.sh` (service `blackout-web`, port 8090, `tailscale serve --http=80 --set-path=/blackouts`). URL: `http://personal-vps/blackouts/`. Restart the service after changes to Python files; `vps/web/` changes only need a reload.
+- Dashboard: installed with `bash vps/install_web.sh` (service `blackout-web`, port 8090, Caddy route `/blackouts` in home-dashboard `deploy/Caddyfile`). URL: `http://personal-vps/blackouts/`. Restart the service after changes to Python files; `vps/web/` changes only need a reload.
 - Pi: `sanso@pi-nas`, repo at `/home/sanso/projects/blackout-logger`, service `blackout-uptime`. Restart only when `pi/` changes: a poll during the restart opens a short false `internet` blackout.
 
 ## Known pitfalls
 
-- **Tailscale key expiry on the VPS** shows up as `[Errno 101] Network is unreachable` for every poll and looks like a never-ending outage (Sep 23 to Oct 12, 2026). Key expiry is disabled on both nodes; check `tailscale status` first when every poll fails that way.
+- **A broken VPN path looks like a never-ending outage.** It happened with Tailscale key expiry (Sep 23 to Oct 12, 2026, `[Errno 101] Network is unreachable` on every poll). Since 2026-10-26 the Pi is reached over WireGuard (`PI_ADDRESS=10.8.0.2`); when every poll fails, check `wg show` on both hosts for a recent handshake first.
 - **Pi logs do not survive power cuts.** OpenMediaVault's `folder2ram` keeps `/var/log` in RAM, so the journal of a boot that lost power ends a few seconds in. Use the VPS data, or the speedtest-logger DB on the Pi, to reconstruct what happened.
 - **The VPS is IPv6-only**; outbound access to IPv4-only hosts goes through a NAT64-style workaround.

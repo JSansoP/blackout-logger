@@ -13,7 +13,7 @@ A lightweight, zero-dependency power outage detector. A Raspberry Pi at home act
 │  port 8080      │  JSON    │  │  SQLite DB    │   │──── Telegram
 │                 │          │  │  uptime_logs  │   │     notifications
 └─────────────────┘          │  │  blackouts    │   │
-     Tailscale               │  └───────────────┘   │
+     WireGuard               │  └───────────────┘   │
                              └──────────────────────┘
 ```
 
@@ -28,7 +28,7 @@ A lightweight, zero-dependency power outage detector. A Raspberry Pi at home act
 ## Prerequisites
 
 - Python 3.11+ on both machines. No third-party packages are needed.
-- Both machines connected via [Tailscale](https://tailscale.com/). Disable key expiry for both nodes in the Tailscale admin console: an expired key on the VPS looks like an endless outage.
+- Both machines connected by a [WireGuard](https://www.wireguard.com/) VPN (VPS hub `10.8.0.1`, Pi `10.8.0.2` with `PersistentKeepalive`). A broken tunnel looks like an endless outage.
 - A Telegram bot (create one via [@BotFather](https://t.me/BotFather)).
 
 ## Setup
@@ -65,7 +65,7 @@ The `.env` file lives at the project root. Main settings:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `PI_ADDRESS` | Tailscale IP of the Pi (required) | |
+| `PI_ADDRESS` | WireGuard IP of the Pi (required) | |
 | `PI_PORT` | Port of the uptime server | `8080` |
 | `POLL_TIMEOUT` | Seconds to wait for the Pi | `10` |
 | `RETRY_INTERVAL` | Seconds between retries while the Pi is unreachable | `60` |
@@ -90,13 +90,13 @@ When `HEARTBEAT_URL` is set, every run pings `<url>/start` first (also runs that
 
 ### 3. Dashboard (optional)
 
-A read-only dashboard shows whether the Pi is online, the last outage, and the outages of the last 7, 30 or 90 days drawn by day and time of day. It is served by `vps/web_server.py` (stdlib only) on `127.0.0.1:8090` and published on the tailnet with [Tailscale Serve](https://tailscale.com/kb/1312/serve):
+A read-only dashboard shows whether the Pi is online, the last outage, and the outages of the last 7, 30 or 90 days drawn by day and time of day. It is served by `vps/web_server.py` (stdlib only) on `127.0.0.1:8090` and published on the VPN by the VPS reverse proxy (Caddy on `10.8.0.1:80`, config in home-dashboard `deploy/Caddyfile`):
 
 ```bash
 bash vps/install_web.sh [port] [path]   # defaults: 8090 /blackouts
 ```
 
-The script installs the `blackout-web` systemd service and runs `tailscale serve --bg --http=80 --set-path=/blackouts http://127.0.0.1:8090`, so the dashboard is at `http://<vps-hostname>/blackouts/` for devices in the tailnet only. After pulling changes to `vps/web_server.py`, run `systemctl restart blackout-web`; changes in `vps/web/` only need a browser reload.
+The script installs the `blackout-web` systemd service; Caddy routes `/blackouts` to it, so the dashboard is at `http://personal-vps/blackouts/` for WireGuard peers only. After pulling changes to `vps/web_server.py`, run `systemctl restart blackout-web`; changes in `vps/web/` only need a browser reload.
 
 API, used by the page:
 
@@ -188,7 +188,7 @@ blackout-logger/
 │   ├── recompute_blackouts.py     # One-off recomputation of resolved blackouts
 │   ├── setup_cron.sh              # Cron installation helper
 │   ├── web_server.py              # Read-only dashboard server and JSON API
-│   ├── install_web.sh             # Installs the dashboard service and Tailscale Serve route
+│   ├── install_web.sh             # Installs the dashboard service
 │   ├── web/                       # Dashboard frontend (HTML, CSS, JS, Archivo font)
 │   ├── test_blackout_logic.py
 │   ├── test_heartbeat.py
