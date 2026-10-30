@@ -1,7 +1,7 @@
 const RANGES = {
-  7: { rowHeight: 22, gap: 4, label: "weekday" },
-  30: { rowHeight: 12, gap: 3, label: "weekday" },
-  90: { rowHeight: 5, gap: 2, label: "monday" },
+  7: { rowHeight: 22, gap: 4, weekGap: 10, label: "weekday" },
+  30: { rowHeight: 12, gap: 3, weekGap: 8, label: "weekday" },
+  90: { rowHeight: 5, gap: 2, weekGap: 7, label: "monday" },
 };
 const REFRESH_MS = 60_000;
 const DAY_MS = 86_400_000;
@@ -214,6 +214,7 @@ function renderMap() {
 
   map.style.setProperty("--row-h", `${range.rowHeight}px`);
   map.style.setProperty("--row-gap", `${range.gap}px`);
+  map.style.setProperty("--week-gap", `${range.weekGap}px`);
 
   const hours = [0, 6, 12, 18, 24].map((h) => `<span style="left:${(h / 24) * 100}%">${String(h).padStart(2, "0")}:00</span>`).join("");
   const rows = [`<div class="map-axis" aria-hidden="true"><div></div><div class="map-hours">${hours}</div></div>`];
@@ -233,7 +234,8 @@ function renderMap() {
     }
     const future = i === 0 ? `<span class="map-future" style="left:${(((now - dayStart) / span) * 100).toFixed(3)}%" title="Now"></span>` : "";
     const weekend = dayStart.getDay() === 0 || dayStart.getDay() === 6 ? " weekend" : "";
-    rows.push(`<div class="map-row"><span class="map-day${weekend}">${esc(dayLabel(dayStart, range.label))}</span><div class="map-track">${marks.join("")}${future}</div></div>`);
+    const weekStart = dayStart.getDay() === 1 && i < state.days - 1 ? " week-start" : "";
+    rows.push(`<div class="map-row${weekStart}"><span class="map-day${weekend}">${esc(dayLabel(dayStart, range.label))}</span><div class="map-track">${marks.join("")}${future}</div></div>`);
   }
   map.innerHTML = rows.join("");
   map.setAttribute("role", "img");

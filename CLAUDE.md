@@ -15,7 +15,7 @@ Power outage detector: a Raspberry Pi 5 at home exposes its uptime, a VPS polls 
 - `vps/config.py`: reads `.env` from the project root (not `vps/`); existing environment variables win.
 - `vps/recompute_blackouts.py`: one-off recomputation of resolved blackouts; dry run unless `--apply`.
 - `vps/web_server.py`: read-only dashboard (`ThreadingHTTPServer`), `GET /`, `/static/*` (files in `vps/web/`), `/api/status`, `/api/blackouts?days=N`. Runs as the `blackout-web` systemd service on `127.0.0.1:8090`. Reuses `blackout_checker._is_unanswered_stuck_blackout` for the `stuck` state instead of re-deriving it.
-- `vps/web/`: plain HTML/CSS/JS, no build step. Same visual system as speedtest-logger (Archivo variable font, same color tokens, readouts, panels, tables) but a single page. The distinctive element is the outage map: one row per local day, outages placed by time of day.
+- `vps/web/`: plain HTML/CSS/JS, no build step. Same visual system as speedtest-logger (Archivo variable font, same color tokens, readouts, panels, tables) but a single page. The distinctive element is the outage map: one row per local day, outages placed by time of day. Rows run newest first and a wider gap below each Monday separates weeks (`weekGap` per range in `RANGES`). Row height is pinned to `--row-h` so the day label never stretches a row.
 
 ## Design decisions
 
