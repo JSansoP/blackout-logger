@@ -51,4 +51,4 @@ Power outage detector: a Raspberry Pi 5 at home exposes its uptime, a VPS polls 
 
 - **A broken VPN path looks like a never-ending outage.** It happened with Tailscale key expiry (Sep 23 to Oct 12, 2026, `[Errno 101] Network is unreachable` on every poll). Since 2026-10-26 the Pi is reached over WireGuard (`PI_ADDRESS=10.8.0.2`); when every poll fails, check `wg show` on both hosts for a recent handshake first.
 - **Pi logs do not survive power cuts.** OpenMediaVault's `folder2ram` keeps `/var/log` in RAM, so the journal of a boot that lost power ends a few seconds in. Use the VPS data, or the speedtest-logger DB on the Pi, to reconstruct what happened.
-- **The VPS is IPv6-only**; outbound access to IPv4-only hosts goes through a NAT64-style workaround.
+- The VPS has public IPv4 and IPv6 and uses Hetzner's DNS resolvers. The old NAT64 DNS override in `/etc/systemd/resolved.conf` was disabled on 2026-11-15 (it returned NXDOMAIN for new domains); backup in `resolved.conf.bak-nat64-20261115`.
